@@ -9,11 +9,14 @@ export default function Sidebar({
   onNew,
   onDelete,
   onView,
+  username,
+  onLogout,
 }) {
   return (
     <aside className="sidebar">
       <div className="brand">KAI</div>
       <div className="brand-sub">PERSONAL AI — V2</div>
+      <div className="account-row"><span>{username}</span><button className="auth-switch" onClick={onLogout}>Sign out</button></div>
 
       <nav className="side-nav">
         <button
