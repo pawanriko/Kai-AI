@@ -1,8 +1,4 @@
-// API client: every call the UI makes to the Django backend lives here.
-// All URLs are relative (/api/...) — Vite's dev proxy forwards them to
-// Django on :8000, and in production Django serves this app itself, so
-// the same paths work in both worlds. The browser never sees an AI key.
-
+// Same-origin API client. Session cookies authenticate users; CSRF tokens protect writes.
 export const MODELS = [
   { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B' },
   { id: 'openai/gpt-oss-120b', label: 'GPT OSS 120B' },
@@ -12,10 +8,24 @@ export const MODELS = [
   { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B' },
 ]
 
+function readCookie(name) {
+  const entry = document.cookie.split('; ').find((part) => part.startsWith(`${name}=`))
+  return entry ? decodeURIComponent(entry.split('=').slice(1).join('=')) : ''
+}
+
 async function request(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase()
+  const headers = { 'Content-Type': 'application/json', ...options.headers }
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    await fetch('/api/csrf/', { credentials: 'same-origin' })
+    const token = readCookie('csrftoken')
+    if (token) headers['X-CSRFToken'] = token
+  }
   const response = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     ...options,
+    method,
+    headers,
   })
   if (!response.ok) {
     let message = `Request failed (${response.status})`
@@ -23,7 +33,7 @@ async function request(path, options = {}) {
       const data = await response.json()
       if (data.error) message = data.error
     } catch {
-      // keep the generic message
+      // Keep the generic message.
     }
     throw new Error(message)
   }
@@ -31,33 +41,23 @@ async function request(path, options = {}) {
   return response.json()
 }
 
+export function getMe() { return request('/api/auth/me/') }
+export function register(username, password) {
+  return request('/api/auth/register/', { method: 'POST', body: JSON.stringify({ username, password }) })
+}
+export function login(username, password) {
+  return request('/api/auth/login/', { method: 'POST', body: JSON.stringify({ username, password }) })
+}
+export function logout() { return request('/api/auth/logout/', { method: 'POST', body: '{}' }) }
 export function sendChat(message, conversationId, model) {
-  return request('/api/chat/', {
-    method: 'POST',
-    body: JSON.stringify({
-      message,
-      conversation_id: conversationId,
-      model,
-    }),
-  })
+  return request('/api/chat/', { method: 'POST', body: JSON.stringify({ message, conversation_id: conversationId, model }) })
 }
-
-export function listConversations() {
-  return request('/api/conversations/')
-}
-
-export function getConversation(id) {
-  return request(`/api/conversations/${id}/`)
-}
-
+export function listConversations() { return request('/api/conversations/') }
+export function getConversation(id) { return request(`/api/conversations/${id}/`) }
 export function deleteConversation(id) {
   return request(`/api/conversations/${id}/delete/`, { method: 'DELETE' })
 }
-
-export function listMemories() {
-  return request('/api/memories/')
-}
-
+export function listMemories() { return request('/api/memories/') }
 export function deleteMemory(id) {
   return request(`/api/memories/${id}/delete/`, { method: 'DELETE' })
 }
