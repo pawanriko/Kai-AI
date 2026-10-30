@@ -41,7 +41,7 @@ kai-v2/
 │   ├── ai.py                 the ONLY module that talks to Groq/Gemini
 │   ├── views.py              the API endpoints
 │   ├── urls.py               /api/ route table
-│   └── tests.py              11 tests, AI mocked (no network)
+│   └── tests.py              22 tests, AI mocked (no network)
 └── frontend/                 Vite + React
     └── src/
         ├── api.js            every backend call in one place
@@ -54,7 +54,8 @@ kai-v2/
 | Method | Path | What |
 |---|---|---|
 | GET | `/api/ping/` | health check |
-| POST | `/api/chat/` | `{message, conversation_id?, model?}` → `{reply, conversation_id}` |
+| GET | `/api/models/` | provider + model catalogue for the picker |
+| POST | `/api/chat/` | `{message, conversation_id?, model?, agent?}` → `{reply, conversation_id, trace}` |
 | GET | `/api/conversations/` | list conversations |
 | GET | `/api/conversations/<id>/` | conversation + messages |
 | DELETE | `/api/conversations/<id>/delete/` | delete conversation |
@@ -85,19 +86,42 @@ npm run dev
 Open http://localhost:5173 — the Vite dev server proxies `/api` calls
 to Django on :8000.
 
-Tests: `python manage.py test` (11 tests, no network needed).
+Tests: `python manage.py test` (22 tests, no network needed).
 
 ## Providers
 
-`ai.py` tries Groq first when `GROQ_API_KEY` is set, then Gemini when
-`GEMINI_API_KEY` is set. Set `AI_PROVIDER=groq` or `AI_PROVIDER=gemini`
-in `.env` to pin one provider. The model picker in the UI lists the six
-Groq models from v1.
+`ai.py` holds a provider registry — a model is just a name, a provider
+is the service hosting it (base URL + key + format). Almost all speak
+the OpenAI chat-completions format, so one code path serves them all;
+Gemini has its own adapter.
+
+| Provider | Key in `.env` | Models offered |
+|---|---|---|
+| Groq | `GROQ_API_KEY` | Llama 3.3 70B, GPT OSS 120B/20B, Llama 4 Scout, Qwen3 32B, Llama 3.1 8B |
+| OpenRouter | `OPENROUTER_API_KEY` | Nemotron 3 Super 120B (free), MiniMax M2.7 (free), DeepSeek V3.2 |
+| NVIDIA NIM | `NVIDIA_API_KEY` | Nemotron Super 49B, DeepSeek V4 Flash |
+| DeepSeek | `DEEPSEEK_API_KEY` | DeepSeek Chat, DeepSeek Reasoner |
+| Google Gemini | `GEMINI_API_KEY` | Gemini 2.5 Flash |
+
+The UI's model picker is fed by `GET /api/models/` and disables
+providers whose key is missing. If the chosen provider fails or is
+rate-limited, KAI falls back across the other configured providers;
+set `AI_PROVIDER=<name>` in `.env` to pin one and disable fallback.
+
+## Agent mode
+
+Toggle **Agent** in the composer and KAI stops just chatting: the
+model can call tools — `calculator` (exact maths, AST-sandboxed),
+`current_datetime`, `weather` (Open-Meteo, no key needed) — observe
+the results, and keep going for up to 6 steps before answering. Every
+tool step is saved with the reply and shown under it ("Agent steps"),
+so you can see exactly what it did. Coding-agent mode (file/shell/test
+tools in a sandboxed workspace) is the next phase.
 
 ## Roadmap
 
-Streaming replies (SSE) · voice input + image messages · tool calling
-(calculator / weather / search) with a trace UI · Render deployment.
+Streaming replies (SSE) · voice input + image messages · coding-agent
+mode · Render deployment.
 
 ---
 

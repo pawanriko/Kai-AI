@@ -3,14 +3,10 @@
 // Django on :8000, and in production Django serves this app itself, so
 // the same paths work in both worlds. The browser never sees an AI key.
 
-export const MODELS = [
-  { id: 'llama-3.3-70b-versatile', label: 'Llama 3.3 70B' },
-  { id: 'openai/gpt-oss-120b', label: 'GPT OSS 120B' },
-  { id: 'openai/gpt-oss-20b', label: 'GPT OSS 20B' },
-  { id: 'meta-llama/llama-4-scout-17b-16e-instruct', label: 'Llama 4 Scout' },
-  { id: 'qwen/qwen3-32b', label: 'Qwen3 32B' },
-  { id: 'llama-3.1-8b-instant', label: 'Llama 3.1 8B' },
-]
+// The model catalogue comes from the backend (GET /api/models/): a
+// list of providers, each with its models and a `configured` flag
+// telling whether that provider's API key exists in the server's .env.
+// A picker choice is encoded as "provider::model".
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -31,13 +27,18 @@ async function request(path, options = {}) {
   return response.json()
 }
 
-export function sendChat(message, conversationId, model) {
+export function listModels() {
+  return request('/api/models/')
+}
+
+export function sendChat(message, conversationId, model, agent = false) {
   return request('/api/chat/', {
     method: 'POST',
     body: JSON.stringify({
       message,
       conversation_id: conversationId,
       model,
+      agent,
     }),
   })
 }

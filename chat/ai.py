@@ -1,38 +1,130 @@
-"""AI provider calls for KAI — the ONLY module that talks to Groq/Gemini.
+"""AI providers for KAI — the ONLY module that talks to AI APIs.
 
-Design rules (same discipline as the HireSense backend):
+Multi-provider design: a model is just a name; a PROVIDER is the
+service that hosts it (base URL + API key + request format). Almost
+every provider now speaks the OpenAI chat-completions format, so one
+code path serves Groq, OpenRouter, NVIDIA NIM and DeepSeek; Gemini is
+the one odd format and has its own adapter below.
+
+Rules:
 - Keys come from the environment (loaded from .env by settings.py).
-  No key is ever written in code, and none ever reaches the browser.
-- Stdlib urllib only — no extra packages.
+  No key is ever written in code or sent to the browser.
+- The UI identifies a choice as "provider::model" (model ids contain
+  slashes, so "::" is the unambiguous separator).
+- ask_ai tries the chosen provider first, then falls back across the
+  other CONFIGURED providers (free tiers rate-limit; falling back is
+  how the app survives that). AI_PROVIDER in .env pins one provider
+  and disables fallback.
 - Every failure returns None; the caller decides what to show.
-- Provider order: if AI_PROVIDER is set ("groq"/"gemini"), only that
-  provider is tried. Otherwise Groq first when its key exists, then
-  Gemini. A provider with no key is skipped.
 """
 
 import json
 import os
-import urllib.error
 import urllib.request
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GEMINI_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "{model}:generateContent"
-)
+PROVIDERS = {
+    "groq": {
+        "label": "Groq",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "key_env": "GROQ_API_KEY",
+        "format": "openai",
+        "models": [
+            ("llama-3.3-70b-versatile", "Llama 3.3 70B"),
+            ("openai/gpt-oss-120b", "GPT OSS 120B"),
+            ("openai/gpt-oss-20b", "GPT OSS 20B"),
+            ("meta-llama/llama-4-scout-17b-16e-instruct", "Llama 4 Scout"),
+            ("qwen/qwen3-32b", "Qwen3 32B"),
+            ("llama-3.1-8b-instant", "Llama 3.1 8B"),
+        ],
+    },
+    "openrouter": {
+        "label": "OpenRouter",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "key_env": "OPENROUTER_API_KEY",
+        "format": "openai",
+        "extra_headers": {"X-Title": "KAI"},
+        "models": [
+            ("nvidia/nemotron-3-super-120b-a12b:free", "Nemotron 3 Super 120B (free)"),
+            ("minimax/minimax-m2.7:free", "MiniMax M2.7 (free)"),
+            ("deepseek/deepseek-v3.2", "DeepSeek V3.2"),
+        ],
+    },
+    "nvidia": {
+        "label": "NVIDIA NIM",
+        "url": "https://integrate.api.nvidia.com/v1/chat/completions",
+        "key_env": "NVIDIA_API_KEY",
+        "format": "openai",
+        "models": [
+            ("nvidia/llama-3.3-nemotron-super-49b-v1.5", "Nemotron Super 49B"),
+            ("deepseek-ai/deepseek-v4-flash", "DeepSeek V4 Flash"),
+        ],
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "url": "https://api.deepseek.com/chat/completions",
+        "key_env": "DEEPSEEK_API_KEY",
+        "format": "openai",
+        "models": [
+            ("deepseek-chat", "DeepSeek Chat"),
+            ("deepseek-reasoner", "DeepSeek Reasoner"),
+        ],
+    },
+    "gemini": {
+        "label": "Google Gemini",
+        "url": (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "{model}:generateContent"
+        ),
+        "key_env": "GEMINI_API_KEY",
+        "format": "gemini",
+        "models": [
+            ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+        ],
+    },
+}
 
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_PROVIDER = "groq"
+FALLBACK_ORDER = ["groq", "openrouter", "nvidia", "deepseek", "gemini"]
 
-# The model ids the UI offers (same six as KAI v1, all Groq-hosted).
-GROQ_MODELS = [
-    "llama-3.3-70b-versatile",
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "qwen/qwen3-32b",
-    "llama-3.1-8b-instant",
-]
+
+def provider_configured(name):
+    """True when the provider's API key exists in the environment."""
+    return bool(os.environ.get(PROVIDERS[name]["key_env"]))
+
+
+def catalog():
+    """The provider/model catalogue for the UI's model picker."""
+    return [
+        {
+            "provider": name,
+            "label": cfg["label"],
+            "configured": provider_configured(name),
+            "models": [
+                {"id": model_id, "label": label}
+                for model_id, label in cfg["models"]
+            ],
+        }
+        for name, cfg in PROVIDERS.items()
+    ]
+
+
+def default_model(provider):
+    return PROVIDERS[provider]["models"][0][0]
+
+
+def parse_choice(choice):
+    """'nvidia::deepseek-ai/...' → ('nvidia', 'deepseek-ai/...').
+
+    A bare model id (no '::') is treated as a Groq model, which keeps
+    old clients working. None → (default provider, its default model).
+    """
+    if not choice:
+        return DEFAULT_PROVIDER, default_model(DEFAULT_PROVIDER)
+    if "::" in choice:
+        provider, model = choice.split("::", 1)
+        if provider in PROVIDERS:
+            return provider, model
+    return DEFAULT_PROVIDER, choice
 
 
 def _post_json(url, payload, headers, timeout=60):
@@ -46,29 +138,27 @@ def _post_json(url, payload, headers, timeout=60):
         return json.loads(response.read().decode("utf-8"))
 
 
-def ask_groq(messages, model=DEFAULT_GROQ_MODEL):
-    """One chat-completions call to Groq. Returns reply text or None."""
-    api_key = os.environ.get("GROQ_API_KEY")
+def _ask_openai(provider, messages, model):
+    cfg = PROVIDERS[provider]
+    api_key = os.environ.get(cfg["key_env"])
     if not api_key:
         return None
+    headers = {"Authorization": f"Bearer {api_key}"}
+    headers.update(cfg.get("extra_headers", {}))
     try:
         data = _post_json(
-            GROQ_URL,
-            {"model": model, "messages": messages},
-            {"Authorization": f"Bearer {api_key}"},
+            cfg["url"], {"model": model, "messages": messages}, headers
         )
         return data["choices"][0]["message"]["content"]
     except Exception:
         return None
 
 
-def ask_gemini(messages, model=DEFAULT_GEMINI_MODEL):
-    """One generateContent call to Gemini. Returns reply text or None.
-
-    Gemini's format differs from Groq's: roles are "user"/"model" and
-    the system prompt travels separately as system_instruction.
-    """
-    api_key = os.environ.get("GEMINI_API_KEY")
+def _ask_gemini(messages, model):
+    """Gemini adapter: roles are 'user'/'model'; the system prompt
+    travels separately as system_instruction."""
+    cfg = PROVIDERS["gemini"]
+    api_key = os.environ.get(cfg["key_env"])
     if not api_key:
         return None
     system_text = "\n".join(
@@ -87,7 +177,7 @@ def ask_gemini(messages, model=DEFAULT_GEMINI_MODEL):
         payload["system_instruction"] = {"parts": [{"text": system_text}]}
     try:
         data = _post_json(
-            GEMINI_URL.format(model=model),
+            cfg["url"].format(model=model),
             payload,
             {"x-goog-api-key": api_key},
         )
@@ -97,32 +187,88 @@ def ask_gemini(messages, model=DEFAULT_GEMINI_MODEL):
         return None
 
 
-def ask_ai(messages, model=None):
-    """Ask whichever provider is configured. Returns text or None.
+def _ask(provider, messages, model):
+    if PROVIDERS[provider]["format"] == "gemini":
+        return _ask_gemini(messages, model)
+    return _ask_openai(provider, messages, model)
 
-    `model` only applies to Groq (the UI's model picker lists Groq
-    models); Gemini always uses its default model.
+
+def chat_completion(provider, messages, model, tools=None):
+    """One raw chat-completions call (OpenAI-format providers only).
+
+    Returns the full assistant message dict — which may carry
+    `tool_calls` instead of text — or None on any failure. The agent
+    loop uses this; plain chat uses ask_ai.
     """
+    cfg = PROVIDERS[provider]
+    api_key = os.environ.get(cfg["key_env"])
+    if not api_key or cfg["format"] != "openai":
+        return None
+    payload = {"model": model, "messages": messages}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    headers.update(cfg.get("extra_headers", {}))
+    try:
+        data = _post_json(cfg["url"], payload, headers, timeout=90)
+        return data["choices"][0]["message"]
+    except Exception:
+        return None
+
+
+def agent_provider(choice):
+    """Pick (provider, model) for an agent run: the user's choice when
+    it's a configured OpenAI-format provider, else the first configured
+    OpenAI-format provider in fallback order. (Gemini's tool-calling
+    format differs, so agent runs stay on OpenAI-format providers.)"""
+    provider, model = parse_choice(choice)
+    if (
+        PROVIDERS[provider]["format"] == "openai"
+        and provider_configured(provider)
+    ):
+        return provider, model
+    for other in FALLBACK_ORDER:
+        if (
+            PROVIDERS[other]["format"] == "openai"
+            and provider_configured(other)
+        ):
+            return other, default_model(other)
+    return provider, model
+
+
+def ask_ai(messages, model=None):
+    """Ask the chosen provider; fall back across configured providers.
+
+    `model` is a 'provider::model' choice (or a bare Groq model id).
+    Returns the reply text, or None when every attempt failed.
+    """
+    provider, model_id = parse_choice(model)
     pinned = os.environ.get("AI_PROVIDER", "").strip().lower()
-    if pinned == "groq":
-        return ask_groq(messages, model or DEFAULT_GROQ_MODEL)
-    if pinned == "gemini":
-        return ask_gemini(messages)
-    if os.environ.get("GROQ_API_KEY"):
-        reply = ask_groq(messages, model or DEFAULT_GROQ_MODEL)
+    if pinned in PROVIDERS:
+        return _ask(pinned, messages, default_model(pinned))
+
+    attempts = [(provider, model_id)]
+    for other in FALLBACK_ORDER:
+        if other != provider:
+            attempts.append((other, default_model(other)))
+    for attempt_provider, attempt_model in attempts:
+        if not provider_configured(attempt_provider):
+            continue
+        reply = _ask(attempt_provider, messages, attempt_model)
         if reply is not None:
             return reply
-    return ask_gemini(messages)
+    return None
 
 
 def extract_facts(user_text, assistant_text):
     """Ask the AI to pull durable facts about the user from one exchange.
 
-    Returns a list of short fact strings (possibly empty). This is the
-    server-side version of v1's browser-side extractFacts(): facts are
+    Returns a list of short fact strings (possibly empty). Facts are
     about the USER (name, college, exams, goals, preferences) — never
     about the assistant. Any failure returns []: memory extraction is
-    best-effort and must never break the chat itself.
+    best-effort and must never break the chat itself. Uses a small fast
+    Groq model when available; otherwise the normal fallback chain.
     """
     prompt = (
         "From this exchange, extract durable facts about the USER only "
@@ -132,10 +278,8 @@ def extract_facts(user_text, assistant_text):
         "facts, reply with [].\n\n"
         f"User: {user_text}\nAssistant: {assistant_text}"
     )
-    raw = ask_ai(
-        [{"role": "user", "content": prompt}],
-        model="llama-3.1-8b-instant",
-    )
+    choice = "groq::llama-3.1-8b-instant" if provider_configured("groq") else None
+    raw = ask_ai([{"role": "user", "content": prompt}], model=choice)
     if not raw:
         return []
     try:

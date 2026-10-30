@@ -10,6 +10,7 @@ from . import views
 
 urlpatterns = [
     path("ping/", views.ping, name="ping"),
+    path("models/", views.model_catalog, name="model-catalog"),
     path("chat/", views.chat, name="chat"),
     path("conversations/", views.conversation_list, name="conversation-list"),
     path(
