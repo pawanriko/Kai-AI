@@ -3,20 +3,21 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   deleteConversation,
   getConversation,
+  getMe,
   listConversations,
+  logout,
   MODELS,
   sendChat,
 } from './api'
+import AuthScreen from './components/AuthScreen'
 import ChatInput from './components/ChatInput'
 import MemoryPanel from './components/MemoryPanel'
 import MessageList from './components/MessageList'
 import Sidebar from './components/Sidebar'
 
-// App is the conductor: it owns the shared state (which conversation
-// is open, its messages, the chosen model) and passes data + callbacks
-// down to the presentational components. Components never fetch on
-// their own — except MemoryPanel, which owns its little world.
 export default function App() {
+  const [user, setUser] = useState(null)
+  const [authChecked, setAuthChecked] = useState(false)
   const [view, setView] = useState('chat')
   const [conversations, setConversations] = useState([])
   const [activeId, setActiveId] = useState(null)
@@ -29,14 +30,41 @@ export default function App() {
     try {
       const data = await listConversations()
       setConversations(data.conversations)
-    } catch {
-      setError('Could not reach the server — is Django running on :8000?')
+    } catch (err) {
+      setError(err.message === 'authentication required'
+        ? 'Your session has expired. Sign in again.'
+        : 'Could not reach the server. Is Django running on :8000?')
     }
   }, [])
 
   useEffect(() => {
+    getMe()
+      .then((data) => {
+        setUser(data.user)
+        return listConversations()
+      })
+      .then((data) => setConversations(data.conversations))
+      .catch(() => setUser(null))
+      .finally(() => setAuthChecked(true))
+  }, [])
+
+  function handleAuthenticated(authenticatedUser) {
+    setUser(authenticatedUser)
+    setError('')
     refreshConversations()
-  }, [refreshConversations])
+  }
+
+  async function handleLogout() {
+    try {
+      await logout()
+    } finally {
+      setUser(null)
+      setConversations([])
+      setActiveId(null)
+      setMessages([])
+      setError('')
+    }
+  }
 
   async function openConversation(id) {
     setView('chat')
@@ -58,34 +86,37 @@ export default function App() {
   }
 
   async function removeConversation(id) {
-    await deleteConversation(id)
-    if (id === activeId) newChat()
-    refreshConversations()
+    try {
+      await deleteConversation(id)
+      if (id === activeId) newChat()
+      await refreshConversations()
+    } catch (err) {
+      setError(err.message)
+    }
   }
 
   async function handleSend(text) {
     setError('')
     setSending(true)
-    // Optimistic: show the user's message before the server answers.
     setMessages((prev) => [...prev, { role: 'user', content: text }])
     try {
       const data = await sendChat(text, activeId, model)
       setActiveId(data.conversation_id)
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: data.reply },
-      ])
+      setMessages((prev) => [...prev, { role: 'assistant', content: data.reply }])
       refreshConversations()
     } catch (err) {
-      setError(
-        err.message === 'AI unavailable'
-          ? '⚠️ AI unavailable — check the server keys (.env) and try again.'
-          : `⚠️ ${err.message}`,
-      )
+      setError(err.message === 'AI unavailable'
+        ? 'AI unavailable. Check the server keys in .env and try again.'
+        : err.message)
     } finally {
       setSending(false)
     }
   }
+
+  if (!authChecked) {
+    return <main className="auth-screen"><p className="muted">Loading KAI…</p></main>
+  }
+  if (!user) return <AuthScreen onAuthenticated={handleAuthenticated} />
 
   return (
     <div className="layout">
@@ -93,26 +124,18 @@ export default function App() {
         conversations={conversations}
         activeId={activeId}
         view={view}
+        username={user.username}
         onSelect={openConversation}
         onNew={newChat}
         onDelete={removeConversation}
         onView={setView}
+        onLogout={handleLogout}
       />
       <main className="main">
-        {view === 'memory' ? (
-          <MemoryPanel />
-        ) : (
-          <>
-            {error && <div className="error-box">{error}</div>}
-            <MessageList messages={messages} sending={sending} />
-            <ChatInput
-              model={model}
-              onModel={setModel}
-              onSend={handleSend}
-              sending={sending}
-            />
-          </>
-        )}
+        {error && <div className="error-box">{error}</div>}
+        {view === 'memory'
+          ? <MemoryPanel />
+          : <><MessageList messages={messages} sending={sending} /><ChatInput model={model} onModel={setModel} onSend={handleSend} sending={sending} /></>}
       </main>
     </div>
   )
