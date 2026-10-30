@@ -86,7 +86,11 @@ def chat(request):
     )
 
     trace = []
-    if body.get("agent"):
+    if body.get("coding"):
+        reply, trace = agent.run_agent(
+            messages, body.get("model") or None, coding=True
+        )
+    elif body.get("agent"):
         reply, trace = agent.run_agent(messages, body.get("model") or None)
     else:
         reply = ai.ask_ai(messages, model=body.get("model") or None)

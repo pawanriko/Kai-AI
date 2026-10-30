@@ -262,6 +262,94 @@ class ChatAgentEndpointTests(TestCase):
         self.assertEqual(assistant.trace[0]["tool"], "calculator")
 
 
+class CodingToolTests(TestCase):
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.dict(
+            "os.environ", {"KAI_WORKSPACE": self.tmp.name}
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_write_read_edit_roundtrip(self):
+        from . import coding_tools
+
+        self.assertIn("Wrote", coding_tools.write_file("a/b.py", "x = 1\n"))
+        self.assertEqual(coding_tools.read_file("a/b.py"), "x = 1\n")
+        self.assertIn(
+            "Edited", coding_tools.edit_file("a/b.py", "x = 1", "x = 2")
+        )
+        self.assertEqual(coding_tools.read_file("a/b.py"), "x = 2\n")
+        self.assertIn("b.py", coding_tools.list_files())
+        self.assertIn("a/b.py:1", coding_tools.search_code("x = 2"))
+
+    def test_paths_cannot_escape_the_workspace(self):
+        from . import coding_tools
+
+        self.assertIn("outside", coding_tools.read_file("../secret.txt"))
+        self.assertIn(
+            "outside", coding_tools.write_file("../../evil.py", "x")
+        )
+
+    def test_run_command_allowlist(self):
+        from . import coding_tools
+
+        coding_tools.write_file("hello.py", "print(42)\n")
+        result = coding_tools.run_command("python hello.py")
+        self.assertIn("exit code 0", result)
+        self.assertIn("42", result)
+        self.assertIn("not allowed", coding_tools.run_command("curl http://x"))
+        self.assertIn(
+            "not allowed", coding_tools.run_command("python -m os")
+        )
+
+
+class AgentCodingLoopTests(TestCase):
+    def test_agent_writes_a_file_with_coding_tools(self):
+        import tempfile
+        from pathlib import Path
+
+        from . import agent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {"KAI_WORKSPACE": tmp}):
+                with mock.patch(
+                    "chat.agent.ai.chat_completion"
+                ) as completion:
+                    completion.side_effect = [
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "c1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "write_file",
+                                        "arguments": (
+                                            '{"path": "app.py", '
+                                            '"content": "print(1)"}'
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                        {"role": "assistant", "content": "Created app.py."},
+                    ]
+                    reply, trace = agent.run_agent(
+                        [{"role": "user", "content": "make app.py"}],
+                        coding=True,
+                    )
+            self.assertEqual(reply, "Created app.py.")
+            self.assertEqual(trace[0]["tool"], "write_file")
+            self.assertEqual(
+                (Path(tmp) / "app.py").read_text(), "print(1)"
+            )
+
+
 class MemoryApiTests(TestCase):
     def test_list_and_delete(self):
         memory = Memory.objects.create(fact="User studies at IITM Janakpuri")

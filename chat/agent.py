@@ -17,33 +17,58 @@ the user can see exactly what KAI did.
 
 import json
 
-from . import ai, tools
+from . import ai, coding_tools, tools
 
 MAX_STEPS = 6
+CODING_MAX_STEPS = 14
 AGENT_NOTE = (
     " You have tools available (calculator, current_datetime, weather). "
     "Use them whenever a question needs exact maths, the current "
     "date/time, or live weather — never guess those."
 )
+CODING_NOTE = (
+    " You are in CODING MODE. You also have coding tools that work "
+    "inside one sandboxed workspace folder: list_files, read_file, "
+    "write_file, edit_file, search_code, and run_command (allowlisted: "
+    "python, node, npm test/run, git status/diff/log). Discipline: "
+    "explore first (list_files/search_code) before editing; prefer "
+    "edit_file over rewriting whole files; after EVERY change run the "
+    "tests with run_command, read failures carefully, and fix them; "
+    "finish with a short summary of what you changed."
+)
 
 
-def run_agent(messages, choice=None):
+def _dispatch(name, args):
+    result = coding_tools.run_coding_tool(name, args)
+    if result is not None:
+        return result
+    return tools.run_tool(name, args)
+
+
+def run_agent(messages, choice=None, coding=False):
     """Run the loop. `messages` is the chat history incl. a system
     message. Returns (reply_text, trace) — reply_text is None only
     when the provider never answered at all."""
     provider, model = ai.agent_provider(choice)
+    schemas = list(tools.TOOL_SCHEMAS)
+    max_steps = MAX_STEPS
+    note = AGENT_NOTE
+    if coding:
+        schemas += coding_tools.CODING_TOOL_SCHEMAS
+        max_steps = CODING_MAX_STEPS
+        note = CODING_NOTE
     working = [dict(m) for m in messages]
     if working and working[0].get("role") == "system":
-        working[0]["content"] = working[0]["content"] + AGENT_NOTE
+        working[0]["content"] = working[0]["content"] + note
 
     trace = []
-    for step in range(MAX_STEPS):
-        last_round = step == MAX_STEPS - 1
+    for step in range(max_steps):
+        last_round = step == max_steps - 1
         message = ai.chat_completion(
             provider,
             working,
             model,
-            tools=None if last_round else tools.TOOL_SCHEMAS,
+            tools=None if last_round else schemas,
         )
         if message is None:
             return None, trace
@@ -62,7 +87,7 @@ def run_agent(messages, choice=None):
                 args = json.loads(function.get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
-            result = tools.run_tool(name, args)
+            result = _dispatch(name, args)
             trace.append(
                 {"tool": name, "args": args, "result": result[:600]}
             )

@@ -41,7 +41,7 @@ kai-v2/
 │   ├── ai.py                 the ONLY module that talks to Groq/Gemini
 │   ├── views.py              the API endpoints
 │   ├── urls.py               /api/ route table
-│   └── tests.py              22 tests, AI mocked (no network)
+│   └── tests.py              26 tests, AI + tools mocked (no network)
 └── frontend/                 Vite + React
     └── src/
         ├── api.js            every backend call in one place
@@ -55,7 +55,7 @@ kai-v2/
 |---|---|---|
 | GET | `/api/ping/` | health check |
 | GET | `/api/models/` | provider + model catalogue for the picker |
-| POST | `/api/chat/` | `{message, conversation_id?, model?, agent?}` → `{reply, conversation_id, trace}` |
+| POST | `/api/chat/` | `{message, conversation_id?, model?, agent?, coding?}` → `{reply, conversation_id, trace}` |
 | GET | `/api/conversations/` | list conversations |
 | GET | `/api/conversations/<id>/` | conversation + messages |
 | DELETE | `/api/conversations/<id>/delete/` | delete conversation |
@@ -86,7 +86,7 @@ npm run dev
 Open http://localhost:5173 — the Vite dev server proxies `/api` calls
 to Django on :8000.
 
-Tests: `python manage.py test` (22 tests, no network needed).
+Tests: `python manage.py test` (26 tests, no network needed).
 
 ## Providers
 
@@ -115,13 +115,25 @@ model can call tools — `calculator` (exact maths, AST-sandboxed),
 `current_datetime`, `weather` (Open-Meteo, no key needed) — observe
 the results, and keep going for up to 6 steps before answering. Every
 tool step is saved with the reply and shown under it ("Agent steps"),
-so you can see exactly what it did. Coding-agent mode (file/shell/test
-tools in a sandboxed workspace) is the next phase.
+so you can see exactly what it did.
+
+## Coding mode
+
+Toggle **Code** and KAI becomes a coding agent over a longer budget
+(14 steps), working Claude-Code-style: explore → edit → run tests →
+read failures → fix. Its coding tools — `list_files`, `read_file`,
+`write_file`, `edit_file`, `search_code`, `run_command` — are confined
+to a single sandbox folder (`agent_workspace/` in the project, or
+`KAI_WORKSPACE` in `.env`): every path is checked against that root
+and escapes are refused. `run_command` is allowlisted (python + safe
+modules, node, npm test/run, git status/diff/log), shell-free, with a
+30-second timeout. The agent can never touch the Django project itself
+or anything else on the machine.
 
 ## Roadmap
 
-Streaming replies (SSE) · voice input + image messages · coding-agent
-mode · Render deployment.
+Streaming replies (SSE) · voice input + image messages · per-step
+approval prompts for file writes · Render deployment.
 
 ---
 
