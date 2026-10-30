@@ -10,6 +10,8 @@ export default function ChatInput({
   onModel,
   agent,
   onAgent,
+  coding,
+  onCoding,
   onSend,
   sending,
 }) {
@@ -52,13 +54,22 @@ export default function ChatInput({
       >
         Agent {agent ? 'ON' : 'OFF'}
       </button>
+      <button
+        className={coding ? 'agent-toggle active' : 'agent-toggle'}
+        onClick={() => onCoding(!coding)}
+        title="Coding mode: KAI can read/write code and run tests in the sandbox workspace"
+      >
+        Code {coding ? 'ON' : 'OFF'}
+      </button>
       <textarea
         className="composer-input"
         rows={1}
         placeholder={
-          agent
-            ? 'Ask KAI to do something — it can use tools…'
-            : 'Type a message…'
+          coding
+            ? 'Tell KAI what to build or fix in the workspace…'
+            : agent
+              ? 'Ask KAI to do something — it can use tools…'
+              : 'Type a message…'
         }
         value={text}
         onChange={(e) => setText(e.target.value)}

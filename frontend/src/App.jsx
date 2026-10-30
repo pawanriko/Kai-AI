@@ -24,6 +24,7 @@ export default function App() {
   const [providers, setProviders] = useState([])
   const [model, setModel] = useState('groq::llama-3.3-70b-versatile')
   const [agent, setAgent] = useState(false)
+  const [coding, setCoding] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
 
@@ -83,7 +84,7 @@ export default function App() {
     // Optimistic: show the user's message before the server answers.
     setMessages((prev) => [...prev, { role: 'user', content: text }])
     try {
-      const data = await sendChat(text, activeId, model, agent)
+      const data = await sendChat(text, activeId, model, agent, coding)
       setActiveId(data.conversation_id)
       setMessages((prev) => [
         ...prev,
@@ -125,6 +126,8 @@ export default function App() {
               onModel={setModel}
               agent={agent}
               onAgent={setAgent}
+              coding={coding}
+              onCoding={setCoding}
               onSend={handleSend}
               sending={sending}
             />

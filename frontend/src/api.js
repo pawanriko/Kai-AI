@@ -31,7 +31,13 @@ export function listModels() {
   return request('/api/models/')
 }
 
-export function sendChat(message, conversationId, model, agent = false) {
+export function sendChat(
+  message,
+  conversationId,
+  model,
+  agent = false,
+  coding = false
+) {
   return request('/api/chat/', {
     method: 'POST',
     body: JSON.stringify({
@@ -39,6 +45,7 @@ export function sendChat(message, conversationId, model, agent = false) {
       conversation_id: conversationId,
       model,
       agent,
+      coding,
     }),
   })
 }
