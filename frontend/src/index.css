@@ -301,6 +301,63 @@ body {
   cursor: default;
 }
 
+.agent-toggle {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 0 0.8rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.agent-toggle.active {
+  color: var(--bg);
+  background: var(--text);
+  border-color: var(--text);
+  font-weight: 700;
+}
+
+/* ---------- Agent trace ---------- */
+.trace {
+  margin-top: 0.6rem;
+  border-top: 1px dashed var(--line);
+  padding-top: 0.5rem;
+  font-size: 0.82rem;
+}
+
+.trace summary {
+  cursor: pointer;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.68rem;
+}
+
+.trace-step {
+  margin-top: 0.45rem;
+}
+
+.trace-tool {
+  font-weight: 700;
+  margin-right: 0.4rem;
+}
+
+.trace-args {
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+  font-size: 0.78rem;
+}
+
+.trace-result {
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 0.15rem;
+}
+
 /* ---------- Memory / errors ---------- */
 .memory-panel {
   padding: 2rem;

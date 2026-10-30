@@ -31,6 +31,20 @@ export default function MessageList({ messages, sending }) {
               {m.role === 'user' ? 'YOU' : 'KAI'}
             </div>
             <div className="bubble-text">{m.content}</div>
+            {m.trace && m.trace.length > 0 && (
+              <details className="trace">
+                <summary>Agent steps ({m.trace.length})</summary>
+                {m.trace.map((step, j) => (
+                  <div key={j} className="trace-step">
+                    <span className="trace-tool">{step.tool}</span>
+                    <span className="trace-args">
+                      {JSON.stringify(step.args)}
+                    </span>
+                    <div className="trace-result">{step.result}</div>
+                  </div>
+                ))}
+              </details>
+            )}
           </div>
         </div>
       ))}

@@ -36,6 +36,9 @@ class Message(models.Model):
     )
     role = models.CharField(max_length=16, choices=Role.choices)
     content = models.TextField()
+    # Agent runs record their tool steps here: [{tool, args, result}].
+    # Plain chat messages simply keep the empty list.
+    trace = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -4,7 +4,7 @@ import {
   deleteConversation,
   getConversation,
   listConversations,
-  MODELS,
+  listModels,
   sendChat,
 } from './api'
 import ChatInput from './components/ChatInput'
@@ -21,7 +21,9 @@ export default function App() {
   const [conversations, setConversations] = useState([])
   const [activeId, setActiveId] = useState(null)
   const [messages, setMessages] = useState([])
-  const [model, setModel] = useState(MODELS[0].id)
+  const [providers, setProviders] = useState([])
+  const [model, setModel] = useState('groq::llama-3.3-70b-versatile')
+  const [agent, setAgent] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
 
@@ -37,6 +39,18 @@ export default function App() {
   useEffect(() => {
     refreshConversations()
   }, [refreshConversations])
+
+  useEffect(() => {
+    // Load the provider/model catalogue; default to the first model
+    // of the first provider that actually has a key configured.
+    listModels()
+      .then((data) => {
+        setProviders(data.providers)
+        const ready = data.providers.find((p) => p.configured)
+        if (ready) setModel(`${ready.provider}::${ready.models[0].id}`)
+      })
+      .catch(() => {})
+  }, [])
 
   async function openConversation(id) {
     setView('chat')
@@ -69,11 +83,11 @@ export default function App() {
     // Optimistic: show the user's message before the server answers.
     setMessages((prev) => [...prev, { role: 'user', content: text }])
     try {
-      const data = await sendChat(text, activeId, model)
+      const data = await sendChat(text, activeId, model, agent)
       setActiveId(data.conversation_id)
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: data.reply },
+        { role: 'assistant', content: data.reply, trace: data.trace || [] },
       ])
       refreshConversations()
     } catch (err) {
@@ -106,8 +120,11 @@ export default function App() {
             {error && <div className="error-box">{error}</div>}
             <MessageList messages={messages} sending={sending} />
             <ChatInput
+              providers={providers}
               model={model}
               onModel={setModel}
+              agent={agent}
+              onAgent={setAgent}
               onSend={handleSend}
               sending={sending}
             />

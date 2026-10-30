@@ -21,7 +21,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 
-from . import ai
+from . import agent, ai
 from .models import Conversation, Memory, Message
 
 SYSTEM_PROMPT = (
@@ -33,6 +33,15 @@ SYSTEM_PROMPT = (
 def ping(request):
     """GET /api/ping/ → a tiny JSON object saying the server is alive."""
     return JsonResponse({"status": "ok", "message": "pong from Django"})
+
+
+def model_catalog(request):
+    """GET /api/models/ → providers + models for the UI picker.
+
+    Each provider is flagged `configured` (its API key exists in .env)
+    so the UI can disable choices that would only fail.
+    """
+    return JsonResponse({"providers": ai.catalog()})
 
 
 def _system_prompt():
@@ -76,7 +85,11 @@ def chat(request):
         + [{"role": "user", "content": user_text}]
     )
 
-    reply = ai.ask_ai(messages, model=body.get("model") or None)
+    trace = []
+    if body.get("agent"):
+        reply, trace = agent.run_agent(messages, body.get("model") or None)
+    else:
+        reply = ai.ask_ai(messages, model=body.get("model") or None)
     if reply is None:
         return JsonResponse({"error": "AI unavailable"}, status=502)
 
@@ -91,6 +104,7 @@ def chat(request):
         conversation=conversation,
         role=Message.Role.ASSISTANT,
         content=reply,
+        trace=trace,
     )
     conversation.save(update_fields=["updated_at"])
 
@@ -102,7 +116,7 @@ def chat(request):
             known.add(fact.lower())
 
     return JsonResponse(
-        {"reply": reply, "conversation_id": conversation.pk}
+        {"reply": reply, "conversation_id": conversation.pk, "trace": trace}
     )
 
 
@@ -134,6 +148,7 @@ def conversation_detail(request, pk):
                     "id": m.pk,
                     "role": m.role,
                     "content": m.content,
+                    "trace": m.trace,
                     "created_at": m.created_at.isoformat(),
                 }
                 for m in conversation.messages.all()
