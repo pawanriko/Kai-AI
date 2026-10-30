@@ -11,10 +11,19 @@ These three classes are KAI's entire long-term memory:
                  real rows the user can list and delete).
 """
 
+from django.conf import settings
 from django.db import models
 
 
 class Conversation(models.Model):
+    # Nullable only to preserve existing pre-auth records; API queries never expose them.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="kai_conversations",
+        null=True,
+        blank=True,
+    )
     title = models.CharField(max_length=120, default="New conversation")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -46,6 +55,14 @@ class Message(models.Model):
 
 
 class Memory(models.Model):
+    # Nullable only for legacy records created before account support.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="kai_memories",
+        null=True,
+        blank=True,
+    )
     fact = models.TextField()
     created_at = models.DateTimeField(auto_now_add=True)
 
