@@ -1,25 +1,16 @@
-"""HTTP endpoints for KAI — the whole API surface.
-
-    GET    /api/ping/                  → {"status": "ok", ...}
-    POST   /api/chat/                  → send a message, get the AI reply
-    GET    /api/conversations/         → list conversations (sidebar)
-    GET    /api/conversations/<id>/    → one conversation + its messages
-    DELETE /api/conversations/<id>/    → delete a conversation
-    GET    /api/memories/              → list stored facts about the user
-    DELETE /api/memories/<id>/         → forget one fact
-
-Every view follows the same shape: request in → work → JsonResponse out.
-Chat flow: load (or create) the conversation, rebuild its messages into
-the list-of-dicts shape the AI APIs expect, prepend a system prompt that
-carries the stored Memory facts, call ai.ask_ai, save both new messages,
-then run fact extraction so KAI keeps learning about the user.
-"""
+"""JSON API for KAI, including session authentication and per-user data isolation."""
 
 import json
+from functools import wraps
 
+from django.contrib.auth import authenticate, login, logout
+from django.contrib.auth.models import User
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.http import JsonResponse
+from django.middleware.csrf import get_token
 from django.shortcuts import get_object_or_404
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import ensure_csrf_cookie
 
 from . import ai
 from .models import Conversation, Memory, Message
@@ -30,48 +21,125 @@ SYSTEM_PROMPT = (
 )
 
 
+def _json_body(request):
+    try:
+        return json.loads(request.body or b"{}"), None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, JsonResponse({"error": "invalid JSON"}, status=400)
+
+
+def _authenticated(view):
+    @wraps(view)
+    def wrapped(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "authentication required"}, status=401)
+        return view(request, *args, **kwargs)
+    return wrapped
+
+
 def ping(request):
-    """GET /api/ping/ → a tiny JSON object saying the server is alive."""
     return JsonResponse({"status": "ok", "message": "pong from Django"})
 
 
-def _system_prompt():
-    facts = [m.fact for m in Memory.objects.all()]
-    if not facts:
-        return SYSTEM_PROMPT
-    facts_text = "\n".join(f"- {fact}" for fact in facts)
-    return f"{SYSTEM_PROMPT}\n\nFacts you know about the user:\n{facts_text}"
+@ensure_csrf_cookie
+def csrf_token(request):
+    return JsonResponse({"csrfToken": get_token(request)})
 
 
-@csrf_exempt
-def chat(request):
-    """POST /api/chat/  {"message": str, "conversation_id"?: int,
-    "model"?: str} → {"reply": str, "conversation_id": int}"""
+def auth_me(request):
+    if not request.user.is_authenticated:
+        return JsonResponse({"authenticated": False}, status=401)
+    return JsonResponse({
+        "authenticated": True,
+        "user": {"id": request.user.pk, "username": request.user.get_username()},
+    })
+
+
+def auth_register(request):
     if request.method != "POST":
         return JsonResponse({"error": "POST only"}, status=405)
+    body, error = _json_body(request)
+    if error:
+        return error
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "")
+    if len(username) < 3 or len(username) > 150:
+        return JsonResponse({"error": "username must be 3 to 150 characters"}, status=400)
+    if User.objects.filter(username__iexact=username).exists():
+        return JsonResponse({"error": "username already exists"}, status=409)
     try:
-        body = json.loads(request.body or b"{}")
-    except json.JSONDecodeError:
-        return JsonResponse({"error": "invalid JSON"}, status=400)
+        validate_password(password)
+    except ValidationError as exc:
+        return JsonResponse({"error": " ".join(exc.messages)}, status=400)
+    user = User.objects.create_user(username=username, password=password)
+    login(request, user)
+    return JsonResponse({
+        "authenticated": True,
+        "user": {"id": user.pk, "username": user.get_username()},
+    }, status=201)
 
-    user_text = (body.get("message") or "").strip()
+
+def auth_login(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST only"}, status=405)
+    body, error = _json_body(request)
+    if error:
+        return error
+    user = authenticate(
+        request,
+        username=str(body.get("username") or "").strip(),
+        password=str(body.get("password") or ""),
+    )
+    if user is None:
+        return JsonResponse({"error": "invalid username or password"}, status=401)
+    login(request, user)
+    return JsonResponse({
+        "authenticated": True,
+        "user": {"id": user.pk, "username": user.get_username()},
+    })
+
+
+def auth_logout(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST only"}, status=405)
+    logout(request)
+    return JsonResponse({"authenticated": False})
+
+
+def _system_prompt(user):
+    facts = list(Memory.objects.filter(user=user).values_list("fact", flat=True))
+    if not facts:
+        return SYSTEM_PROMPT
+    facts_text = "\\n".join(f"- {fact}" for fact in facts)
+    return f"{SYSTEM_PROMPT}\\n\\nFacts you know about the user:\\n{facts_text}"
+
+
+@_authenticated
+def chat(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "POST only"}, status=405)
+    body, error = _json_body(request)
+    if error:
+        return error
+
+    user_text = str(body.get("message") or "").strip()
     if not user_text:
         return JsonResponse({"error": "message is required"}, status=400)
 
     conversation = None
     if body.get("conversation_id"):
         conversation = get_object_or_404(
-            Conversation, pk=body["conversation_id"]
+            Conversation, pk=body["conversation_id"], user=request.user
         )
 
     history = []
     if conversation is not None:
         history = [
-            {"role": m.role, "content": m.content}
-            for m in conversation.messages.all()
+            {"role": message.role, "content": message.content}
+            for message in conversation.messages.all()
         ]
     messages = (
-        [{"role": "system", "content": _system_prompt()}]
+        [{"role": "system", "content": _system_prompt(request.user)}]
         + history
         + [{"role": "user", "content": user_text}]
     )
@@ -82,90 +150,85 @@ def chat(request):
 
     if conversation is None:
         conversation = Conversation.objects.create(
-            title=user_text[:60] or "New conversation"
+            user=request.user, title=user_text[:60] or "New conversation"
         )
     Message.objects.create(
         conversation=conversation, role=Message.Role.USER, content=user_text
     )
     Message.objects.create(
-        conversation=conversation,
-        role=Message.Role.ASSISTANT,
-        content=reply,
+        conversation=conversation, role=Message.Role.ASSISTANT, content=reply
     )
     conversation.save(update_fields=["updated_at"])
 
-    # Best-effort memory: pull durable facts from this exchange.
-    known = {m.fact.lower() for m in Memory.objects.all()}
+    known = {
+        fact.lower()
+        for fact in Memory.objects.filter(user=request.user).values_list("fact", flat=True)
+    }
     for fact in ai.extract_facts(user_text, reply):
-        if fact.lower() not in known:
-            Memory.objects.create(fact=fact)
+        fact = str(fact).strip()
+        if fact and fact.lower() not in known:
+            Memory.objects.create(user=request.user, fact=fact)
             known.add(fact.lower())
 
-    return JsonResponse(
-        {"reply": reply, "conversation_id": conversation.pk}
-    )
+    return JsonResponse({"reply": reply, "conversation_id": conversation.pk})
 
 
+@_authenticated
 def conversation_list(request):
-    """GET /api/conversations/ → sidebar data, newest activity first."""
     data = [
-        {
-            "id": c.pk,
-            "title": c.title,
-            "created_at": c.created_at.isoformat(),
-            "updated_at": c.updated_at.isoformat(),
-            "message_count": c.messages.count(),
-        }
-        for c in Conversation.objects.all()
-    ]
-    return JsonResponse({"conversations": data})
-
-
-def conversation_detail(request, pk):
-    """GET /api/conversations/<id>/ → the conversation + all messages."""
-    conversation = get_object_or_404(Conversation, pk=pk)
-    return JsonResponse(
         {
             "id": conversation.pk,
             "title": conversation.title,
             "created_at": conversation.created_at.isoformat(),
-            "messages": [
-                {
-                    "id": m.pk,
-                    "role": m.role,
-                    "content": m.content,
-                    "created_at": m.created_at.isoformat(),
-                }
-                for m in conversation.messages.all()
-            ],
+            "updated_at": conversation.updated_at.isoformat(),
+            "message_count": conversation.messages.count(),
         }
-    )
+        for conversation in Conversation.objects.filter(user=request.user)
+    ]
+    return JsonResponse({"conversations": data})
 
 
-@csrf_exempt
+@_authenticated
+def conversation_detail(request, pk):
+    conversation = get_object_or_404(Conversation, pk=pk, user=request.user)
+    return JsonResponse({
+        "id": conversation.pk,
+        "title": conversation.title,
+        "created_at": conversation.created_at.isoformat(),
+        "messages": [
+            {
+                "id": message.pk,
+                "role": message.role,
+                "content": message.content,
+                "created_at": message.created_at.isoformat(),
+            }
+            for message in conversation.messages.all()
+        ],
+    })
+
+
+@_authenticated
 def conversation_delete(request, pk):
-    """DELETE /api/conversations/<id>/ → 204, messages go with it."""
     if request.method != "DELETE":
         return JsonResponse({"error": "DELETE only"}, status=405)
-    conversation = get_object_or_404(Conversation, pk=pk)
+    conversation = get_object_or_404(Conversation, pk=pk, user=request.user)
     conversation.delete()
     return JsonResponse({}, status=204)
 
 
+@_authenticated
 def memory_list(request):
-    """GET /api/memories/ → every fact KAI has stored about the user."""
     data = [
-        {"id": m.pk, "fact": m.fact, "created_at": m.created_at.isoformat()}
-        for m in Memory.objects.all()
+        {"id": memory.pk, "fact": memory.fact, "created_at": memory.created_at.isoformat()}
+        for memory in Memory.objects.filter(user=request.user)
     ]
     return JsonResponse({"memories": data})
 
 
-@csrf_exempt
+@_authenticated
 def memory_delete(request, pk):
-    """DELETE /api/memories/<id>/ → 204; KAI forgets that one fact."""
     if request.method != "DELETE":
         return JsonResponse({"error": "DELETE only"}, status=405)
-    memory = get_object_or_404(Memory, pk=pk)
+    memory = get_object_or_404(Memory, pk=pk, user=request.user)
     memory.delete()
     return JsonResponse({}, status=204)
