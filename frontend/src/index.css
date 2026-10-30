@@ -373,3 +373,75 @@ body {
     max-width: 88%;
   }
 }
+
+
+/* ---------- Authentication ---------- */
+.auth-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: var(--bg);
+}
+.auth-card {
+  width: min(100%, 420px);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 2rem;
+}
+.auth-card h1 {
+  font-family: 'Archivo', sans-serif;
+  font-weight: 900;
+  margin: 0.5rem 0 0;
+}
+.auth-card label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.auth-card input {
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 0.75rem;
+  font: inherit;
+}
+.auth-card input:focus {
+  outline: 1px solid var(--text);
+}
+.auth-card .error-box {
+  margin: 0;
+}
+.auth-switch {
+  align-self: flex-start;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0.3rem 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.auth-switch:hover {
+  color: var(--text);
+}
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.8rem;
+  margin-bottom: 0.8rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
