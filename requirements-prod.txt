@@ -1,0 +1,4 @@
+# Deploy-only dependencies (Linux container). Kept out of requirements.txt
+# so a local Windows setup never has to install them.
+gunicorn==23.0.0
+psycopg[binary]==3.2.10

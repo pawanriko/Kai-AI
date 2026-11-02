@@ -1,0 +1,10 @@
+.git
+.venv
+.env
+db.sqlite3
+__pycache__
+*.pyc
+agent_workspace
+frontend/node_modules
+frontend/dist
+.antideploy.json
