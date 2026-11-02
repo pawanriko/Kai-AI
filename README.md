@@ -1,19 +1,16 @@
-# KAI v2 — Personal AI Assistant (Django + React)
+# KAI v2 — my personal AI assistant (Django + React)
 
-KAI v1 was a single `index.html`: the browser held the Groq API key and
-talked to Groq directly, and memory lived in `localStorage` — gone when
-the browser data went. **v2 is a real full-stack app:**
+The first version of KAI was a single `index.html` file. The browser kept the Groq API key, talked to Groq directly, and the "memory" lived in localStorage — so it forgot everything the day I cleared my browser data. It worked, but it wasn't a real app.
 
-- **Django backend** holds the API keys server-side (`.env`, never in
-  git, never in the browser), calls Groq/Gemini, and stores everything
-  in a database.
-- **React frontend** is just the face: it talks to Django with JSON.
-- **Real memory**: conversations and messages are database rows, and
-  after every exchange KAI extracts durable facts about the user into a
-  `Memory` table that feeds future system prompts — and can be viewed
-  and deleted in the UI.
+So I rebuilt it properly. v2 is a full-stack app:
 
-## Architecture
+- A **Django backend** keeps the API keys on the server (in a `.env` file, never in git, never in the browser), talks to the AI providers, and stores everything in a database.
+- A **React frontend** which is just the face — it sends JSON to Django and shows what comes back.
+- **Memory that actually lasts**: conversations and messages are database rows. After every exchange, KAI pulls out facts about me (my college, my projects, things like that) and saves them in a `Memory` table. Those facts go into future prompts, and I can see and delete them from the UI.
+
+**Live:** [kai-ai.antideploy.app](https://kai-ai.antideploy.app) — it runs, though the free host's network is slow, so a local run feels much better.
+
+## How it fits together
 
 ```
 Browser (React, :5173 dev) ──JSON──► Django API (:8000) ──HTTPS──► Groq / Gemini
@@ -22,11 +19,7 @@ Browser (React, :5173 dev) ──JSON──► Django API (:8000) ──HTTPS─
                                    SQLite (dev) → Postgres
 ```
 
-One message's journey: React POSTs `/api/chat/` → Django loads the
-conversation's history from the DB → rebuilds the list-of-dicts the AI
-APIs expect → prepends a system prompt carrying the stored facts →
-calls the provider → saves both messages → extracts new facts → JSON
-reply back to React.
+What happens when I send one message: React POSTs to `/api/chat/` → Django loads that conversation's history from the DB → puts together the message list the AI APIs expect → adds a system prompt carrying my stored facts → calls the provider → saves both messages → extracts any new facts → sends the reply back to React.
 
 ## Project map
 
@@ -83,17 +76,13 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:5173 — the Vite dev server proxies `/api` calls
-to Django on :8000.
+Open http://localhost:5173 — the Vite dev server proxies `/api` calls to Django on :8000.
 
 Tests: `python manage.py test` (26 tests, no network needed).
 
 ## Providers
 
-`ai.py` holds a provider registry — a model is just a name, a provider
-is the service hosting it (base URL + key + format). Almost all speak
-the OpenAI chat-completions format, so one code path serves them all;
-Gemini has its own adapter.
+In `ai.py` there's a registry of providers. A model is just a name; a provider is the service hosting it (base URL + key + format). Almost all of them speak the OpenAI chat-completions format, so one code path covers them; Gemini has its own adapter because its API is shaped differently.
 
 | Provider | Key in `.env` | Models offered |
 |---|---|---|
@@ -101,41 +90,22 @@ Gemini has its own adapter.
 | OpenRouter | `OPENROUTER_API_KEY` | Nemotron 3 Super 120B (free), MiniMax M2.7 (free), DeepSeek V3.2 |
 | NVIDIA NIM | `NVIDIA_API_KEY` | Nemotron Super 49B, DeepSeek V4 Flash |
 | DeepSeek | `DEEPSEEK_API_KEY` | DeepSeek Chat, DeepSeek Reasoner |
-| Google Gemini | `GEMINI_API_KEY` | Gemini 2.5 Flash |
+| Google Gemini | `GEMINI_API_KEY` | Gemini 3.8 Flash, Gemini 2.5 Flash |
 
-The UI's model picker is fed by `GET /api/models/` and disables
-providers whose key is missing. If the chosen provider fails or is
-rate-limited, KAI falls back across the other configured providers;
-set `AI_PROVIDER=<name>` in `.env` to pin one and disable fallback.
+The model picker in the UI is fed by `GET /api/models/`, and providers whose key I haven't set are greyed out. If the provider I pick fails or hits a rate limit, KAI quietly tries the other configured ones. If I want only one provider, I set `AI_PROVIDER=<name>` in `.env` and the fallback stops.
 
 ## Agent mode
 
-Toggle **Agent** in the composer and KAI stops just chatting: the
-model can call tools — `calculator` (exact maths, AST-sandboxed),
-`current_datetime`, `weather` (Open-Meteo, no key needed) — observe
-the results, and keep going for up to 6 steps before answering. Every
-tool step is saved with the reply and shown under it ("Agent steps"),
-so you can see exactly what it did.
+There's an **Agent** toggle in the message box. With it on, KAI doesn't just answer — the model can use tools: a `calculator` (exact maths, run through a sandboxed expression parser), `current_datetime`, and `weather` (Open-Meteo, needs no key). It can call a tool, look at the result, and call another, up to 6 steps, before it replies. Every step it took is saved with the reply and shown under it ("Agent steps"), so I can see exactly what it did instead of trusting it blindly.
 
 ## Coding mode
 
-Toggle **Code** and KAI becomes a coding agent over a longer budget
-(14 steps), working Claude-Code-style: explore → edit → run tests →
-read failures → fix. Its coding tools — `list_files`, `read_file`,
-`write_file`, `edit_file`, `search_code`, `run_command` — are confined
-to a single sandbox folder (`agent_workspace/` in the project, or
-`KAI_WORKSPACE` in `.env`): every path is checked against that root
-and escapes are refused. `run_command` is allowlisted (python + safe
-modules, node, npm test/run, git status/diff/log), shell-free, with a
-30-second timeout. The agent can never touch the Django project itself
-or anything else on the machine.
+The **Code** toggle makes KAI a coding agent with a bigger budget (14 steps). It works the way coding agents do: look around → edit → run the tests → read the failure → fix it. Its tools (`list_files`, `read_file`, `write_file`, `edit_file`, `search_code`, `run_command`) only work inside one sandbox folder — `agent_workspace/` in the project, or whatever `KAI_WORKSPACE` points to in `.env`. Every file path is checked against that folder and anything trying to escape gets refused. `run_command` has an allowlist (python and its safe modules, node, npm test/run, git status/diff/log), runs without a shell, and times out after 30 seconds. It can't touch the Django project itself or anything else on the machine. That limit is deliberate — I wanted to see what an agent does when it can actually break things, without letting it break mine.
 
-## Roadmap
+## What's next
 
-Streaming replies (SSE) · voice input + image messages · per-step
-approval prompts for file writes · Render deployment.
+Streaming replies (SSE) · voice input and image messages · asking my approval before the coding agent writes a file.
 
 ---
 
-Built by **Pawan Kumar** — [GitHub](https://github.com/pawanriko) ·
-[LinkedIn](https://www.linkedin.com/in/pawanriko)
+Built by **Pawan Kumar** — [GitHub](https://github.com/pawanriko) · [LinkedIn](https://www.linkedin.com/in/pawanriko)
