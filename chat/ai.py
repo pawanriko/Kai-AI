@@ -78,6 +78,7 @@ PROVIDERS = {
         "key_env": "GEMINI_API_KEY",
         "format": "gemini",
         "models": [
+            ("gemini-3.8-flash", "Gemini 3.8 Flash"),
             ("gemini-2.5-flash", "Gemini 2.5 Flash"),
         ],
     },
@@ -127,7 +128,7 @@ def parse_choice(choice):
     return DEFAULT_PROVIDER, choice
 
 
-def _post_json(url, payload, headers, timeout=60):
+def _post_json(url, payload, headers, timeout=25):
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -211,7 +212,7 @@ def chat_completion(provider, messages, model, tools=None):
     headers = {"Authorization": f"Bearer {api_key}"}
     headers.update(cfg.get("extra_headers", {}))
     try:
-        data = _post_json(cfg["url"], payload, headers, timeout=90)
+        data = _post_json(cfg["url"], payload, headers, timeout=30)
         return data["choices"][0]["message"]
     except Exception:
         return None
