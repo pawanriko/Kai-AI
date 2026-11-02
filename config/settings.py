@@ -10,7 +10,9 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 
@@ -27,12 +29,27 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-isj!&dl#16-f9%$+ub==nhmmm(n9jo+gi)p+(a5(pt#$94kt(h'
+# In production the platform provides SECRET_KEY through the environment;
+# the value below is only a local-development fallback.
+SECRET_KEY = os.environ.get(
+    'SECRET_KEY',
+    'django-insecure-isj!&dl#16-f9%$+ub==nhmmm(n9jo+gi)p+(a5(pt#$94kt(h',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Local development keeps debug on; the deployed container sets DEBUG=0.
+DEBUG = os.environ.get('DEBUG', '1') not in ('0', 'false', 'False', '')
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
+
+# The platform sets APP_URL / SITE_URL to the app's live address; trust
+# that origin for CSRF so forms and the admin work behind its proxy.
+CSRF_TRUSTED_ORIGINS = [
+    url for url in (
+        os.environ.get('APP_URL', ''),
+        os.environ.get('SITE_URL', ''),
+    ) if url.startswith('http')
+]
 
 
 # Application definition
@@ -51,6 +68,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # WhiteNoise serves the collected static files (and, through
+    # WHITENOISE_ROOT below, the built React app) in production.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -82,12 +102,31 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+def _database_from_url(url):
+    """Parse a postgres:// DATABASE_URL into a Django database dict."""
+    parts = urlparse(url)
+    query = parse_qs(parts.query)
+    return {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': parts.path.lstrip('/'),
+        'USER': parts.username or '',
+        'PASSWORD': parts.password or '',
+        'HOST': parts.hostname or '',
+        'PORT': parts.port or 5432,
+        'OPTIONS': {'sslmode': query.get('sslmode', ['require'])[0]},
     }
-}
+
+
+# Production provides DATABASE_URL (Postgres); locally we keep SQLite.
+if os.environ.get('DATABASE_URL'):
+    DATABASES = {'default': _database_from_url(os.environ['DATABASE_URL'])}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 
 # Password validation
@@ -125,6 +164,17 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# When the React build exists (frontend/dist, produced by `npm run build`
+# and baked into the deploy image), WhiteNoise serves it at the site
+# root: / returns the app, /assets/* its JS and CSS. Locally, when the
+# folder is absent, nothing changes and Vite serves the app itself.
+_FRONTEND_DIST = BASE_DIR / 'frontend' / 'dist'
+if _FRONTEND_DIST.is_dir():
+    WHITENOISE_ROOT = _FRONTEND_DIST
+    WHITENOISE_INDEX_FILE = True
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
