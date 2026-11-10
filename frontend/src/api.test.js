@@ -1,0 +1,144 @@
+// @vitest-environment jsdom
+//
+// Frontend tests for the Phase 1 auth surface of api.js: the CSRF
+// token must ride on every state-changing request (read fresh from
+// the cookie — Django rotates it at login), GETs must not send it,
+// and server error messages must reach the UI intact (the login
+// form shows them verbatim).
+
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import {
+  confirmMemory,
+  getMe,
+  listConversations,
+  login,
+  logout,
+  rejectMemory,
+  setupOwner,
+} from './api'
+
+function mockFetch(response) {
+  const fetchMock = vi.fn(async () => response)
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+function jsonResponse(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  }
+}
+
+beforeEach(() => {
+  document.cookie = 'csrftoken=fresh-token-123'
+  vi.unstubAllGlobals()
+})
+
+describe('api.js auth + CSRF', () => {
+  it('sends the CSRF token on POST login, with the credentials as JSON', async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { ok: true }))
+    await login('pawan', 'a-strong-pass-1')
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/auth/login/')
+    expect(options.method).toBe('POST')
+    expect(options.headers['X-CSRFToken']).toBe('fresh-token-123')
+    expect(JSON.parse(options.body)).toEqual({
+      username: 'pawan',
+      password: 'a-strong-pass-1',
+    })
+  })
+
+  it('does not send a CSRF token on GET requests', async () => {
+    const fetchMock = mockFetch(
+      jsonResponse(200, { authenticated: false, needs_setup: true })
+    )
+    const me = await getMe()
+    expect(me.needs_setup).toBe(true)
+    const [, options] = fetchMock.mock.calls[0]
+    expect(options.headers['X-CSRFToken']).toBeUndefined()
+  })
+
+  it('surfaces the server error message on a failed login', async () => {
+    mockFetch(jsonResponse(401, { error: 'Invalid username or password.' }))
+    await expect(login('pawan', 'wrong')).rejects.toThrow(
+      'Invalid username or password.'
+    )
+  })
+
+  it('surfaces 401s from data endpoints so the UI can react', async () => {
+    mockFetch(jsonResponse(401, { error: 'Login required.' }))
+    await expect(listConversations()).rejects.toThrow('Login required.')
+  })
+
+  it('sends the bootstrap token when creating the owner', async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { ok: true }))
+    await setupOwner('pawan', 'a-strong-pass-1', 'boot-secret-1')
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/auth/setup/')
+    expect(options.headers['X-CSRFToken']).toBe('fresh-token-123')
+    expect(JSON.parse(options.body)).toEqual({
+      username: 'pawan',
+      password: 'a-strong-pass-1',
+      setup_token: 'boot-secret-1',
+    })
+  })
+
+  it('surfaces a rejected bootstrap token', async () => {
+    mockFetch(jsonResponse(403, { error: 'Invalid setup token.' }))
+    await expect(
+      setupOwner('pawan', 'a-strong-pass-1', 'wrong')
+    ).rejects.toThrow('Invalid setup token.')
+  })
+
+  it('surfaces an already-completed setup (permanent close)', async () => {
+    mockFetch(jsonResponse(403, { error: 'Setup is already complete.' }))
+    await expect(
+      setupOwner('pawan', 'a-strong-pass-1', 'boot-secret-1')
+    ).rejects.toThrow('Setup is already complete.')
+  })
+
+  it('logs out with a CSRF-protected POST', async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { ok: true }))
+    await logout()
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/auth/logout/')
+    expect(options.method).toBe('POST')
+    expect(options.headers['X-CSRFToken']).toBe('fresh-token-123')
+  })
+
+  it('throws errors carrying the HTTP status (401 = session expired)', async () => {
+    mockFetch(jsonResponse(401, { error: 'Login required.' }))
+    const err = await listConversations().catch((e) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err.status).toBe(401)
+  })
+
+  it('confirms a suggested memory via POST to the confirm route', async () => {
+    const fetchMock = mockFetch(
+      jsonResponse(200, { id: 7, status: 'confirmed' })
+    )
+    const result = await confirmMemory(7)
+    expect(result.status).toBe('confirmed')
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/memories/7/confirm/')
+    expect(options.method).toBe('POST')
+    expect(options.headers['X-CSRFToken']).toBe('fresh-token-123')
+  })
+
+  it('rejects a suggested memory and treats the 204 as success', async () => {
+    const fetchMock = mockFetch({
+      ok: true,
+      status: 204,
+      json: async () => {
+        throw new Error('no body')
+      },
+    })
+    await expect(rejectMemory(7)).resolves.toBeNull()
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/memories/7/reject/')
+    expect(options.method).toBe('POST')
+  })
+})

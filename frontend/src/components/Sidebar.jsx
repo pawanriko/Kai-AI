@@ -9,6 +9,8 @@ export default function Sidebar({
   onNew,
   onDelete,
   onView,
+  username,
+  onLogout,
 }) {
   return (
     <aside className="sidebar">
@@ -59,6 +61,13 @@ export default function Sidebar({
           <li className="history-empty">No conversations yet</li>
         )}
       </ul>
+
+      <div className="side-footer">
+        <span className="side-user">{username}</span>
+        <button className="nav-btn" onClick={onLogout}>
+          Log out
+        </button>
+      </div>
     </aside>
   )
 }

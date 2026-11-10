@@ -430,3 +430,49 @@ body {
     max-width: 88%;
   }
 }
+
+/* Phase 1: login gate + sidebar footer */
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.login-box {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(340px, 90vw);
+  padding: 28px;
+  border: 1px solid #2a2f3a;
+  border-radius: 12px;
+  background: #12151c;
+}
+.login-box input {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #2a2f3a;
+  background: #0b0e13;
+  color: inherit;
+}
+.login-box button[type='submit'] {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 0;
+  cursor: pointer;
+  font-weight: 600;
+}
+.side-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 12px;
+}
+.side-user {
+  opacity: 0.75;
+  font-size: 0.85em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
