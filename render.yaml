@@ -33,6 +33,6 @@ services:
       - key: AI_PROVIDER
         value: "gemini"
       - key: APP_URL
-        value: "https://kai-ai.onrender.com"
+        value: "https://kai-ai-02i0.onrender.com"
       - key: PYTHON_VERSION
         value: 3.12.0
