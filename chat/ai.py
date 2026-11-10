@@ -95,7 +95,12 @@ PROVIDERS = {
     },
 }
 
-DEFAULT_PROVIDER = "groq"
+# Last-resort default when NO provider is configured. This used to be
+# "groq", whose key has returned HTTP 403 since 2026-10-31 — a bare
+# model id routed to the one dead provider. parse_choice now prefers
+# the first CONFIGURED provider (see _default_provider); this constant
+# only names the shape of the answer when nothing is configured.
+DEFAULT_PROVIDER = "gemini"
 FALLBACK_ORDER = ["groq", "openrouter", "nvidia", "deepseek", "gemini"]
 
 
@@ -124,19 +129,33 @@ def default_model(provider):
     return PROVIDERS[provider]["models"][0][0]
 
 
+def _default_provider():
+    """The provider a bare model id routes to: the first CONFIGURED
+    one in fallback order, so a dead or keyless provider is never
+    the silent default. (This used to hard-route to Groq, whose key
+    has returned HTTP 403 since 2026-10-31.) Falls back to
+    DEFAULT_PROVIDER when nothing is configured — the call then
+    fails cleanly as 'unavailable'."""
+    for name in FALLBACK_ORDER:
+        if provider_configured(name):
+            return name
+    return DEFAULT_PROVIDER
+
+
 def parse_choice(choice):
     """'nvidia::deepseek-ai/...' → ('nvidia', 'deepseek-ai/...').
 
-    A bare model id (no '::') is treated as a Groq model, which keeps
-    old clients working. None → (default provider, its default model).
+    A bare model id (no '::') belongs to the default provider (see
+    _default_provider). None → (default provider, its default model).
     """
     if not choice:
-        return DEFAULT_PROVIDER, default_model(DEFAULT_PROVIDER)
+        provider = _default_provider()
+        return provider, default_model(provider)
     if "::" in choice:
         provider, model = choice.split("::", 1)
         if provider in PROVIDERS:
             return provider, model
-    return DEFAULT_PROVIDER, choice
+    return _default_provider(), choice
 
 
 class _IPv4HTTPSConnection(http.client.HTTPSConnection):

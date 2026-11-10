@@ -28,19 +28,58 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-# In production the platform provides SECRET_KEY through the environment;
-# the value below is only a local-development fallback.
-SECRET_KEY = os.environ.get(
-    'SECRET_KEY',
-    'django-insecure-isj!&dl#16-f9%$+ub==nhmmm(n9jo+gi)p+(a5(pt#$94kt(h',
-)
-
 # SECURITY WARNING: don't run with debug turned on in production!
 # Local development keeps debug on; the deployed container sets DEBUG=0.
 DEBUG = os.environ.get('DEBUG', '1') not in ('0', 'false', 'False', '')
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
+# The deployed service sets KAI_PRODUCTION=1 (render.yaml). Production
+# turns on the strict settings below and REFUSES to boot without a
+# real SECRET_KEY — a public fallback key must never protect a live
+# deployment (Phase 1 Step 5).
+IS_PRODUCTION = os.environ.get('KAI_PRODUCTION') == '1'
+
+# SECURITY WARNING: keep the secret key used in production secret!
+# In production the platform provides SECRET_KEY through the environment;
+# the value below is only a local-development fallback.
+if os.environ.get('SECRET_KEY'):
+    SECRET_KEY = os.environ['SECRET_KEY']
+elif IS_PRODUCTION:
+    from django.core.exceptions import ImproperlyConfigured
+
+    raise ImproperlyConfigured(
+        'SECRET_KEY must be set in the environment in production.'
+    )
+else:
+    SECRET_KEY = (
+        'django-insecure-isj!&dl#16-f9%$+ub==nhmmm(n9jo+gi)p+(a5(pt#$94kt(h'
+    )
+
+# Hosts: explicit env wins; in production derive from APP_URL (set in
+# render.yaml); locally accept anything. No more wildcard in prod.
+if os.environ.get('ALLOWED_HOSTS'):
+    ALLOWED_HOSTS = os.environ['ALLOWED_HOSTS'].split(',')
+elif IS_PRODUCTION and os.environ.get('APP_URL'):
+    from urllib.parse import urlparse as _urlparse
+
+    ALLOWED_HOSTS = [
+        _urlparse(os.environ['APP_URL']).hostname,
+        'localhost',
+        '127.0.0.1',
+    ]
+elif DEBUG:
+    ALLOWED_HOSTS = ['*']
+else:
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+
+# Transport security for the deployed service (Render terminates TLS
+# and forwards the original scheme in X-Forwarded-Proto).
+if IS_PRODUCTION:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 # The platform sets APP_URL / SITE_URL to the app's live address; trust
 # that origin for CSRF so forms and the admin work behind its proxy.

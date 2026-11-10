@@ -11,10 +11,35 @@ These three classes are KAI's entire long-term memory:
                  real rows the user can list and delete).
 """
 
+from django.conf import settings
 from django.db import models
 
 
+class SetupGuard(models.Model):
+    """Singleton row (pk=1, created by migration 0004).
+
+    First-owner setup UPDATEs this row as the first statement of its
+    transaction. That takes the write lock up front (Postgres row
+    lock; SQLite database lock with busy timeout), serializing
+    concurrent setup attempts — so two racing setup requests can
+    never both pass the "no users exist yet" check. Exactly one
+    owner can ever be created through the setup endpoint.
+    """
+
+    locked_at = models.DateTimeField(auto_now=True)
+
+
 class Conversation(models.Model):
+    # Owner (Phase 1): nullable so pre-auth rows survive the migration
+    # untouched. NULL means "legacy" — visible to the signed-in owner
+    # and claimed by them on first use. New rows always get a user.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="conversations",
+        null=True,
+        blank=True,
+    )
     title = models.CharField(max_length=120, default="New conversation")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -49,7 +74,26 @@ class Message(models.Model):
 
 
 class Memory(models.Model):
+    class Status(models.TextChoices):
+        # Extracted facts start as SUGGESTED (Phase 1 Step 6): they
+        # are AI inferences, so they never reach the system prompt
+        # until the user confirms them in the Memory panel.
+        SUGGESTED = "suggested", "Suggested"
+        CONFIRMED = "confirmed", "Confirmed"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="memories",
+        null=True,
+        blank=True,
+    )
     fact = models.TextField()
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.SUGGESTED,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -10,6 +10,10 @@ from . import views
 
 urlpatterns = [
     path("ping/", views.ping, name="ping"),
+    path("auth/me/", views.me, name="auth-me"),
+    path("auth/setup/", views.setup, name="auth-setup"),
+    path("auth/login/", views.login_view, name="auth-login"),
+    path("auth/logout/", views.logout_view, name="auth-logout"),
     path("models/", views.model_catalog, name="model-catalog"),
     path("chat/", views.chat, name="chat"),
     path("conversations/", views.conversation_list, name="conversation-list"),
@@ -24,6 +28,16 @@ urlpatterns = [
         name="conversation-delete",
     ),
     path("memories/", views.memory_list, name="memory-list"),
+    path(
+        "memories/<int:pk>/confirm/",
+        views.memory_confirm,
+        name="memory-confirm",
+    ),
+    path(
+        "memories/<int:pk>/reject/",
+        views.memory_reject,
+        name="memory-reject",
+    ),
     path(
         "memories/<int:pk>/delete/",
         views.memory_delete,
