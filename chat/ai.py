@@ -25,6 +25,7 @@ import json
 import os
 import socket
 import sys
+import time
 import urllib.request
 
 PROVIDERS = {
@@ -305,7 +306,24 @@ def ask_ai(messages, model=None):
     provider, model_id = parse_choice(model)
     pinned = os.environ.get("AI_PROVIDER", "").strip().lower()
     if pinned in PROVIDERS:
-        return _ask(pinned, messages, default_model(pinned))
+        # A pinned provider still gets model fallback WITHIN itself:
+        # a hot model can answer 503 ("service unavailable") for
+        # minutes at a time while its sibling model is fine (seen
+        # live: gemini-3.8-flash 503ing while pinned). Try the
+        # default model first, then the provider's other models,
+        # with a short pause between attempts.
+        models = [default_model(pinned)] + [
+            model_id
+            for model_id, _label in PROVIDERS[pinned]["models"]
+            if model_id != default_model(pinned)
+        ]
+        for attempt, attempt_model in enumerate(models):
+            if attempt:
+                time.sleep(2)
+            reply = _ask(pinned, messages, attempt_model)
+            if reply is not None:
+                return reply
+        return None
 
     attempts = [(provider, model_id)]
     for other in FALLBACK_ORDER:
