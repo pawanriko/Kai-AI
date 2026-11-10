@@ -16,10 +16,15 @@ Rules:
   how the app survives that). AI_PROVIDER in .env pins one provider
   and disables fallback.
 - Every failure returns None; the caller decides what to show.
+  Failures are also written to the server log (provider + error), so
+  a broken deploy can be told apart from a broken key.
 """
 
+import http.client
 import json
 import os
+import socket
+import sys
 import urllib.request
 
 PROVIDERS = {
@@ -46,7 +51,11 @@ PROVIDERS = {
         "models": [
             ("nvidia/nemotron-3-super-120b-a12b:free", "Nemotron 3 Super 120B (free)"),
             ("minimax/minimax-m2.7:free", "MiniMax M2.7 (free)"),
+            ("meta/muse-ember", "Muse Ember"),
             ("deepseek/deepseek-v3.2", "DeepSeek V3.2"),
+            ("tencent/hy4", "Hy4"),
+            ("mistralai/mistral-large-4-0", "Mistral Large 4"),
+            ("anthropic/claude-opus-4-6", "Opus 4.6"),
         ],
     },
     "nvidia": {
@@ -128,6 +137,52 @@ def parse_choice(choice):
     return DEFAULT_PROVIDER, choice
 
 
+class _IPv4HTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that dials over IPv4 only.
+
+    Some container networks hand back IPv6 addresses whose routes
+    blackhole: the dial then stalls until the socket timeout instead
+    of failing fast, which looks exactly like the provider being
+    down (seen on both Antideploy and Render — chat died at the 25s
+    timeout while the same call took 0.4s from a normal network).
+    Resolving A records only keeps the dial on the network that
+    actually works there. The rest mirrors the stdlib connect(),
+    including the proxy-tunnel case.
+    """
+
+    def connect(self):
+        server_hostname = self._tunnel_host or self.host
+        infos = socket.getaddrinfo(
+            self.host, self.port, socket.AF_INET, socket.SOCK_STREAM
+        )
+        self.sock = socket.create_connection(
+            infos[0][4], self.timeout, self.source_address
+        )
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=server_hostname
+        )
+
+
+class _IPv4HTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_IPv4HTTPSConnection, req, context=self._context)
+
+
+_OPENER = urllib.request.build_opener(_IPv4HTTPSHandler())
+
+
+def _log_failure(provider, exc):
+    """One stderr line per failed provider call (Render: Logs tab)."""
+    print(
+        f"[kai] {provider} call failed: {type(exc).__name__}: {exc}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _post_json(url, payload, headers, timeout=25):
     request = urllib.request.Request(
         url,
@@ -135,7 +190,7 @@ def _post_json(url, payload, headers, timeout=25):
         headers={"Content-Type": "application/json", **headers},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _OPENER.open(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -151,7 +206,8 @@ def _ask_openai(provider, messages, model):
             cfg["url"], {"model": model, "messages": messages}, headers
         )
         return data["choices"][0]["message"]["content"]
-    except Exception:
+    except Exception as exc:
+        _log_failure(provider, exc)
         return None
 
 
@@ -184,7 +240,8 @@ def _ask_gemini(messages, model):
         )
         parts = data["candidates"][0]["content"]["parts"]
         return "".join(part.get("text", "") for part in parts) or None
-    except Exception:
+    except Exception as exc:
+        _log_failure("gemini", exc)
         return None
 
 
@@ -214,7 +271,8 @@ def chat_completion(provider, messages, model, tools=None):
     try:
         data = _post_json(cfg["url"], payload, headers, timeout=30)
         return data["choices"][0]["message"]
-    except Exception:
+    except Exception as exc:
+        _log_failure(provider, exc)
         return None
 
 
