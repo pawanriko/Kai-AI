@@ -28,6 +28,12 @@ services:
     envVars:
       - key: DEBUG
         value: "False"
+      # Phase 1: turns on the strict production settings in
+      # config/settings.py (SECRET_KEY required, secure cookies,
+      # HSTS, ALLOWED_HOSTS from APP_URL). Coding execution stays
+      # OFF: KAI_CODING_ENABLED is deliberately never set here.
+      - key: KAI_PRODUCTION
+        value: "1"
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
@@ -35,6 +41,13 @@ services:
       - key: GEMINI_API_KEY
         sync: false
       - key: OPENROUTER_API_KEY
+        sync: false
+      # Bootstrap secret for first-owner setup: the /api/auth/setup/
+      # endpoint demands this token, so a random visitor can never
+      # claim a fresh deployment. Set a long random value here BEFORE
+      # the first deploy, use it once on the setup screen, then it
+      # may be removed (setup closes permanently once a user exists).
+      - key: KAI_SETUP_TOKEN
         sync: false
       - key: APP_URL
         value: "https://kai-ai-02i0.onrender.com"
