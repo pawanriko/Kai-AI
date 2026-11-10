@@ -269,7 +269,7 @@ class CodingToolTests(TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         patcher = mock.patch.dict(
-            "os.environ", {"KAI_WORKSPACE": self.tmp.name}
+            "os.environ", {"KAI_WORKSPACE": self.tmp.name, "KAI_CODING_ENABLED": "1"}
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -315,7 +315,7 @@ class AgentCodingLoopTests(TestCase):
         from . import agent
 
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.dict("os.environ", {"KAI_WORKSPACE": tmp}):
+            with mock.patch.dict("os.environ", {"KAI_WORKSPACE": tmp, "KAI_CODING_ENABLED": "1"}):
                 with mock.patch(
                     "chat.agent.ai.chat_completion"
                 ) as completion:
@@ -362,3 +362,79 @@ class MemoryApiTests(TestCase):
         response = self.client.delete(f"/api/memories/{memory.pk}/delete/")
         self.assertEqual(response.status_code, 204)
         self.assertEqual(Memory.objects.count(), 0)
+
+class CodingSecurityTests(TestCase):
+    """Step 3: pip is gone, secrets never reach executed code."""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.dict(
+            "os.environ",
+            {
+                "KAI_WORKSPACE": self.tmp.name,
+                "KAI_CODING_ENABLED": "1",
+                "GEMINI_API_KEY": "top-secret-value",
+            },
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_pip_is_not_allowed(self):
+        from . import coding_tools
+
+        self.assertIn(
+            "not allowed",
+            coding_tools.run_command("python -m pip install requests"),
+        )
+
+    def test_run_command_refused_when_switch_off(self):
+        from . import coding_tools
+
+        with mock.patch.object(
+            coding_tools, "execution_enabled", return_value=False
+        ):
+            self.assertIn(
+                "disabled", coding_tools.run_command("python hello.py")
+            )
+
+    def test_secrets_are_scrubbed_from_command_env(self):
+        from . import coding_tools
+
+        coding_tools.write_file(
+            "peek.py",
+            "import os\nprint('KEY IS', os.environ.get('GEMINI_API_KEY'))\n",
+        )
+        result = coding_tools.run_command("python peek.py")
+        self.assertIn("KEY IS None", result)
+        self.assertNotIn("top-secret-value", result)
+
+
+
+
+class AgentGateTests(TestCase):
+    """Unit 1: the agent itself refuses coding while the server-side
+    switch is off (the API view gate arrives with the auth unit)."""
+
+    def test_agent_refuses_coding_when_switch_off(self):
+        from chat.agent import run_agent
+
+        reply, trace = run_agent(
+            [{"role": "user", "content": "make a file"}], coding=True
+        )
+        self.assertIn("disabled", reply)
+        self.assertEqual(trace, [])
+
+    def test_execution_disabled_by_default(self):
+        import os
+
+        from chat import coding_tools
+
+        self.assertNotIn("KAI_CODING_ENABLED", os.environ)
+        self.assertFalse(coding_tools.execution_enabled())
+        self.assertIn(
+            "disabled", coding_tools.run_command("python --version")
+        )
+

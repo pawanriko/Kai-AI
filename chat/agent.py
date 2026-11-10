@@ -49,6 +49,14 @@ def run_agent(messages, choice=None, coding=False):
     """Run the loop. `messages` is the chat history incl. a system
     message. Returns (reply_text, trace) — reply_text is None only
     when the provider never answered at all."""
+    if coding and not coding_tools.execution_enabled():
+        # Defense in depth (Phase 1 Step 0): the API view rejects
+        # coding requests first, but no caller of the agent may ever
+        # reach the coding tools while the server-side switch is off.
+        return (
+            "Coding mode is disabled on this server.",
+            [],
+        )
     provider, model = ai.agent_provider(choice)
     schemas = list(tools.TOOL_SCHEMAS)
     max_steps = MAX_STEPS

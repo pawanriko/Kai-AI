@@ -8,6 +8,19 @@ is refused. The shell tool runs an ALLOWLIST of commands only, with
 no shell (arguments are split, never interpreted), a timeout, and
 truncated output.
 
+SECURITY (Phase 1, 2026-11-10): the path checks confine the FILE
+tools — they do NOT confine code that run_command executes. A Python
+script the model writes runs with this server process's privileges.
+That is why command execution is behind a server-side kill switch:
+it only runs when the operator sets KAI_CODING_ENABLED=1 in the
+server's own environment (never set in production); the API layer
+additionally gates coding mode behind login and an explicit
+per-session confirmation (Phase 1 auth unit), and executed commands
+get a scrubbed environment with no API keys. Even with all that, this is a *restricted subprocess*,
+not a true sandbox: the child inherits network access and the
+server's OS user. Do not enable it on a host you would not hand a
+shell on.
+
 Tools return strings, like all KAI tools — errors come back as text
 the model can react to.
 """
@@ -23,6 +36,18 @@ from django.conf import settings
 
 MAX_READ_CHARS = 20000
 MAX_OUTPUT_CHARS = 6000
+MAX_WRITE_CHARS = 200000
+
+
+def execution_enabled():
+    """Server-side kill switch for command execution (Phase 1 Step 0).
+
+    True ONLY when the operator has set KAI_CODING_ENABLED=1 in the
+    server process's own environment. The deployed service never sets
+    it, so remote code execution is off in production no matter what
+    any client sends.
+    """
+    return os.environ.get("KAI_CODING_ENABLED") == "1"
 
 # ---------------------------------------------------------------- schemas
 
@@ -203,6 +228,11 @@ def write_file(path, content):
     target = _safe_path(path)
     if target is None:
         return "Error: that path is outside the workspace."
+    if len(content) > MAX_WRITE_CHARS:
+        return (
+            f"Error: file too large ({len(content)} characters, "
+            f"limit {MAX_WRITE_CHARS})."
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"Wrote {path} ({len(content)} characters)."
@@ -265,7 +295,25 @@ _ALLOWED = [
     ("git", "log"),
 ]
 # python may only run a script inside the workspace or a safe module.
-_ALLOWED_PY_MODULES = {"pytest", "unittest", "pip"}
+# pip was REMOVED in Phase 1: installing packages is arbitrary code
+# execution (setup hooks) plus network egress — never allowlist it.
+_ALLOWED_PY_MODULES = {"pytest", "unittest"}
+
+# Environment variables whose names contain any of these markers are
+# stripped before a command runs, so executed code never sees the
+# server's API keys, database URL, or other credentials.
+_SECRET_MARKERS = (
+    "KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD",
+    "DATABASE_URL", "DSN", "CREDENTIAL",
+)
+
+
+def _scrubbed_env():
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not any(m in name.upper() for m in _SECRET_MARKERS)
+    }
 
 
 def _command_allowed(argv):
@@ -281,6 +329,12 @@ def _command_allowed(argv):
 
 
 def run_command(command):
+    if not execution_enabled():
+        return (
+            "Error: command execution is disabled on this server. "
+            "The operator must set KAI_CODING_ENABLED=1 on the server "
+            "to allow it; it is never enabled in production."
+        )
     try:
         argv = shlex.split(command)
     except ValueError as exc:
@@ -288,7 +342,7 @@ def run_command(command):
     if not _command_allowed(argv):
         return (
             "Error: command not allowed. Allowed: python [script.py | "
-            "-m pytest/unittest/pip ...], node, npm test, npm run, "
+            "-m pytest/unittest ...], node, npm test, npm run, "
             "git status/diff/log."
         )
     # Running "python" must mean THIS project's interpreter.
@@ -302,6 +356,7 @@ def run_command(command):
             text=True,
             timeout=30,
             shell=False,
+            env=_scrubbed_env(),
         )
     except subprocess.TimeoutExpired:
         return "Error: command timed out after 30 seconds."
