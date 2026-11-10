@@ -50,8 +50,9 @@ PROVIDERS = {
         "format": "openai",
         "extra_headers": {"X-Title": "KAI"},
         "models": [
-            ("nvidia/nemotron-3-super-120b-a12b:free", "Nemotron 3 Super 120B (free)"),
-            ("minimax/minimax-m2.7:free", "MiniMax M2.7 (free)"),
+            ("nvidia/nemotron-3-ultra-550b-a55b:free", "Nemotron 3 Ultra 550B (free)"),
+            ("google/gemma-4-31b-it:free", "Gemma 4 31B (free)"),
+            ("cohere/north-mini-code:free", "North Mini Code (free)"),
             ("meta/muse-ember", "Muse Ember"),
             ("deepseek/deepseek-v3.2", "DeepSeek V3.2"),
             ("tencent/hy4", "Hy4"),
