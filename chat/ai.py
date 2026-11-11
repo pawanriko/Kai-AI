@@ -358,6 +358,141 @@ def ask_ai(messages, model=None):
     return None
 
 
+def _open_stream(url, payload, headers, timeout=60):
+    """Open a streaming POST and yield its raw response lines.
+
+    The connection stays open while the caller iterates; it closes
+    when the generator is exhausted or abandoned.
+    """
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", **headers},
+        method="POST",
+    )
+    with _OPENER.open(request, timeout=timeout) as response:
+        for line in response:
+            yield line.decode("utf-8", "replace").strip()
+
+
+def _sse_payloads(lines):
+    """Yield the JSON payloads of a Server-Sent-Events line stream
+    (both OpenAI-format providers and Gemini use `data:` lines)."""
+    for line in lines:
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if data == "[DONE]":
+            return
+        try:
+            yield json.loads(data)
+        except json.JSONDecodeError:
+            continue
+
+
+def _stream_openai(provider, messages, model):
+    cfg = PROVIDERS[provider]
+    api_key = os.environ.get(cfg["key_env"])
+    if not api_key:
+        return
+    headers = {"Authorization": f"Bearer {api_key}"}
+    headers.update(cfg.get("extra_headers", {}))
+    payload = {"model": model, "messages": messages, "stream": True}
+    for event in _sse_payloads(_open_stream(cfg["url"], payload, headers)):
+        choices = event.get("choices") or []
+        if not choices:
+            continue
+        text = (choices[0].get("delta") or {}).get("content")
+        if text:
+            yield text
+
+
+def _stream_gemini(messages, model):
+    cfg = PROVIDERS["gemini"]
+    api_key = os.environ.get(cfg["key_env"])
+    if not api_key:
+        return
+    system_text = "\n".join(
+        m["content"] for m in messages if m.get("role") == "system"
+    )
+    contents = [
+        {
+            "role": "model" if m["role"] == "assistant" else "user",
+            "parts": [{"text": m["content"]}],
+        }
+        for m in messages
+        if m.get("role") != "system"
+    ]
+    payload = {"contents": contents}
+    if system_text:
+        payload["system_instruction"] = {"parts": [{"text": system_text}]}
+    url = cfg["url"].format(model=model).replace(
+        ":generateContent", ":streamGenerateContent"
+    ) + "?alt=sse"
+    for event in _sse_payloads(
+        _open_stream(url, payload, {"x-goog-api-key": api_key})
+    ):
+        candidates = event.get("candidates") or []
+        if not candidates:
+            continue
+        parts = (candidates[0].get("content") or {}).get("parts") or []
+        text = "".join(part.get("text", "") for part in parts)
+        if text:
+            yield text
+
+
+def _stream(provider, messages, model):
+    if PROVIDERS[provider]["format"] == "gemini":
+        yield from _stream_gemini(messages, model)
+    else:
+        yield from _stream_openai(provider, messages, model)
+
+
+def ask_ai_stream(messages, model=None):
+    """Streaming twin of ask_ai: yields reply text chunks.
+
+    Same attempt order and fallback rules as ask_ai, with one honest
+    difference: fallback can only happen BEFORE the first chunk. Once
+    a provider has produced text, the stream is committed to it — a
+    mid-stream failure just ends the reply early instead of splicing
+    in a different model's continuation. Yields nothing at all when
+    every attempt fails before producing text (the caller then
+    reports 'AI unavailable', exactly like ask_ai returning None).
+    """
+    provider, model_id = parse_choice(model)
+    pinned = os.environ.get("AI_PROVIDER", "").strip().lower()
+    if pinned in PROVIDERS:
+        models = [default_model(pinned)] + [
+            mid
+            for mid, _label in PROVIDERS[pinned]["models"]
+            if mid != default_model(pinned)
+        ]
+        attempts = [(pinned, mid) for mid in models]
+    else:
+        attempts = [(provider, model_id)] + [
+            (other, default_model(other))
+            for other in FALLBACK_ORDER
+            if other != provider
+        ]
+    for attempt_provider, attempt_model in attempts:
+        if not provider_configured(attempt_provider):
+            continue
+        stream = _stream(attempt_provider, messages, attempt_model)
+        try:
+            first = next(stream, None)
+        except Exception as exc:
+            _log_failure(attempt_provider, exc)
+            continue
+        if first is None:
+            continue
+        yield first
+        try:
+            yield from stream
+        except Exception as exc:
+            _log_failure(attempt_provider, exc)
+        return
+
+
 def extract_facts(user_text, assistant_text):
     """Ask the AI to pull durable facts about the user from one exchange.
 

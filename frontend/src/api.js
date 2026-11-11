@@ -98,6 +98,59 @@ export function sendChat(
   })
 }
 
+// Streaming chat (Phase 2): POST /api/chat/stream/ answers with
+// NDJSON events — {"type":"chunk","text"} lines, then a final
+// {"type":"done","conversation_id"} or {"type":"error","error"}.
+// onChunk fires per text piece so the UI can grow the reply bubble
+// live. Resolves with the done event; throws on any failure (a
+// pre-stream HTTP error, or the error event once streaming began).
+export async function sendChatStream(message, conversationId, model, onChunk) {
+  const response = await fetch('/api/chat/stream/', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRFToken': csrfToken(),
+    },
+    body: JSON.stringify({
+      message,
+      conversation_id: conversationId,
+      model,
+    }),
+  })
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`
+    try {
+      const data = await response.json()
+      if (data.error) message = data.error
+    } catch {
+      // keep the generic message
+    }
+    const error = new Error(message)
+    error.status = response.status
+    throw error
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let doneEvent = null
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop()
+    for (const line of lines) {
+      if (!line.trim()) continue
+      const event = JSON.parse(line)
+      if (event.type === 'chunk') onChunk(event.text)
+      else if (event.type === 'done') doneEvent = event
+      else if (event.type === 'error') throw new Error(event.error)
+    }
+  }
+  if (!doneEvent) throw new Error('Stream ended unexpectedly')
+  return doneEvent
+}
+
 export function listConversations() {
   return request('/api/conversations/')
 }

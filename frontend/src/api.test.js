@@ -15,6 +15,7 @@ import {
   login,
   logout,
   rejectMemory,
+  sendChatStream,
   setupOwner,
 } from './api'
 
@@ -126,6 +127,65 @@ describe('api.js auth + CSRF', () => {
     expect(url).toBe('/api/memories/7/confirm/')
     expect(options.method).toBe('POST')
     expect(options.headers['X-CSRFToken']).toBe('fresh-token-123')
+  })
+
+  it('streams chunks (even split mid-line) and resolves with done', async () => {
+    const encoder = new TextEncoder()
+    const pieces = [
+      '{"type":"chunk","text":"Hel',
+      'lo"}\n{"type":"chunk","text":" world"}\n{"type":"done","conversation_id":9,"trace":[]}\n',
+    ]
+    let i = 0
+    const fetchMock = mockFetch({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: async () =>
+            i < pieces.length
+              ? { value: encoder.encode(pieces[i++]), done: false }
+              : { value: undefined, done: true },
+        }),
+      },
+    })
+    const seen = []
+    const done = await sendChatStream(
+      'hi',
+      null,
+      'gemini::gemini-3.8-flash',
+      (t) => seen.push(t)
+    )
+    expect(seen.join('')).toBe('Hello world')
+    expect(done.conversation_id).toBe(9)
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/chat/stream/')
+    expect(options.headers['X-CSRFToken']).toBe('fresh-token-123')
+  })
+
+  it('rejects when the stream reports an error event', async () => {
+    const encoder = new TextEncoder()
+    let sent = false
+    mockFetch({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (sent) return { value: undefined, done: true }
+            sent = true
+            return {
+              value: encoder.encode(
+                '{"type":"error","error":"AI unavailable"}\n'
+              ),
+              done: false,
+            }
+          },
+        }),
+      },
+    })
+    await expect(
+      sendChatStream('hi', null, null, () => {})
+    ).rejects.toThrow('AI unavailable')
   })
 
   it('rejects a suggested memory and treats the 204 as success', async () => {

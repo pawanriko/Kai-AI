@@ -818,3 +818,72 @@ class LegacyDataAccessTests(LoggedInTestCase):
         response = self.client.get("/api/memories/")
         facts = [m["fact"] for m in response.json()["memories"]]
         self.assertIn("User's college is IITM", facts)
+
+
+class StreamingChatTests(LoggedInTestCase):
+    """Phase 2: POST /api/chat/stream/ emits NDJSON chunk events and
+    persists exactly like /api/chat/ once the reply completes."""
+
+    def _stream_body(self, response):
+        raw = b"".join(response.streaming_content).decode()
+        return [json.loads(line) for line in raw.splitlines() if line.strip()]
+
+    def test_chunks_then_done_and_persists(self):
+        with mock.patch(
+            "chat.views.ai.ask_ai_stream",
+            return_value=iter(["Hello ", "world"]),
+        ), mock.patch("chat.views.ai.extract_facts", return_value=[]):
+            response = self.client.post(
+                "/api/chat/stream/",
+                data=json.dumps({"message": "say hi"}),
+                content_type="application/json",
+            )
+            self.assertEqual(response.status_code, 200)
+            # Streaming bodies are lazy: consume INSIDE the mock block,
+            # or the provider mock is gone before the generator runs.
+            events = self._stream_body(response)
+        self.assertEqual(
+            [e["type"] for e in events], ["chunk", "chunk", "done"]
+        )
+        self.assertEqual(events[0]["text"] + events[1]["text"], "Hello world")
+        conversation = Conversation.objects.get()
+        self.assertEqual(events[2]["conversation_id"], conversation.pk)
+        contents = [m.content for m in conversation.messages.all()]
+        self.assertEqual(contents, ["say hi", "Hello world"])
+
+    def test_empty_stream_reports_error_event_and_saves_nothing(self):
+        with mock.patch(
+            "chat.views.ai.ask_ai_stream", return_value=iter([])
+        ):
+            response = self.client.post(
+                "/api/chat/stream/",
+                data=json.dumps({"message": "say hi"}),
+                content_type="application/json",
+            )
+            events = self._stream_body(response)
+        self.assertEqual(events, [{"type": "error", "error": "AI unavailable"}])
+        self.assertEqual(Conversation.objects.count(), 0)
+
+    def test_stream_requires_login(self):
+        response = Client().post(
+            "/api/chat/stream/",
+            data=json.dumps({"message": "hi"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_stream_rejects_agent_mode(self):
+        response = self.client.post(
+            "/api/chat/stream/",
+            data=json.dumps({"message": "hi", "agent": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_stream_keeps_coding_kill_switch(self):
+        response = self.client.post(
+            "/api/chat/stream/",
+            data=json.dumps({"message": "hi", "coding": True}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)

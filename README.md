@@ -74,6 +74,7 @@ several workers requires a shared cache backend such as Redis
 | POST | `/api/auth/login/` · `/api/auth/logout/` | session in/out |
 | GET | `/api/models/` | provider + model catalogue for the picker |
 | POST | `/api/chat/` | `{message, conversation_id?, model?, agent?, coding?, confirm_commands?}` → `{reply, conversation_id, trace}` |
+| POST | `/api/chat/stream/` | same body (plain chat only) → NDJSON stream of `{type: "chunk", text}` events, ending with `{type: "done", conversation_id}` |
 | GET | `/api/conversations/` | list conversations |
 | GET | `/api/conversations/<id>/` | conversation + messages |
 | DELETE | `/api/conversations/<id>/delete/` | delete conversation |
@@ -165,7 +166,7 @@ Phase 1 honesty note: the path checks confine the *file tools*, but code that `r
 
 ## What's next
 
-Streaming replies (SSE) · voice input and image messages · per-step approval prompts inside agent runs.
+Voice input and image messages · per-step approval prompts inside agent runs. (Streaming replies shipped in Phase 2: plain chat streams token-by-token via `/api/chat/stream/`; agent and coding modes still answer atomically so their step traces stay whole.)
 
 ---
 

@@ -8,6 +8,7 @@ import {
   listModels,
   logout as apiLogout,
   sendChat,
+  sendChatStream,
 } from './api'
 import ChatInput from './components/ChatInput'
 import Login from './components/Login'
@@ -150,15 +151,44 @@ export default function App() {
     // Optimistic: show the user's message before the server answers.
     setMessages((prev) => [...prev, { role: 'user', content: text }])
     try {
-      const data = await sendChat(text, activeId, model, agent, coding, coding)
-      setActiveId(data.conversation_id)
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: data.reply, trace: data.trace || [] },
-      ])
+      if (!agent && !coding) {
+        // Streaming path (Phase 2): the assistant bubble appears with
+        // the first chunk and grows as the reply streams in. Agent
+        // and coding modes keep the atomic /api/chat/ path below,
+        // because their step traces arrive with the finished reply.
+        const done = await sendChatStream(text, activeId, model, (chunk) => {
+          setMessages((prev) => {
+            const last = prev[prev.length - 1]
+            if (last && last.role === 'assistant') {
+              const next = [...prev]
+              next[next.length - 1] = {
+                ...last,
+                content: last.content + chunk,
+              }
+              return next
+            }
+            return [...prev, { role: 'assistant', content: chunk, trace: [] }]
+          })
+        })
+        setActiveId(done.conversation_id)
+      } else {
+        const data = await sendChat(text, activeId, model, agent, coding, coding)
+        setActiveId(data.conversation_id)
+        setMessages((prev) => [
+          ...prev,
+          { role: 'assistant', content: data.reply, trace: data.trace || [] },
+        ])
+      }
       refreshConversations()
     } catch (err) {
       if (sessionExpired(err)) return
+      // A stream that died mid-reply leaves a partial bubble behind;
+      // drop it so the transcript never shows a reply the server
+      // did not save.
+      setMessages((prev) => {
+        const last = prev[prev.length - 1]
+        return last && last.role === 'assistant' ? prev.slice(0, -1) : prev
+      })
       setError(
         err.message === 'AI unavailable'
           ? '⚠️ AI unavailable — check the server keys (.env) and try again.'
@@ -205,7 +235,13 @@ export default function App() {
         ) : (
           <>
             {error && <div className="error-box">{error}</div>}
-            <MessageList messages={messages} sending={sending} />
+            <MessageList
+              messages={messages}
+              sending={
+                sending &&
+                messages[messages.length - 1]?.role !== 'assistant'
+              }
+            />
             <ChatInput
               providers={providers}
               model={model}

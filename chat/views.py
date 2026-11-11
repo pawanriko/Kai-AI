@@ -9,6 +9,8 @@
     POST   /api/auth/logout/           → end it
     GET    /api/models/                → provider catalogue   (login)
     POST   /api/chat/                  → send a message       (login)
+    POST   /api/chat/stream/           → send a message, reply
+                                         streamed as NDJSON     (login)
     GET    /api/conversations/         → list conversations   (login)
     GET    /api/conversations/<id>/    → one conversation     (login)
     DELETE /api/conversations/<id>/delete/                    (login)
@@ -41,7 +43,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
@@ -304,26 +306,33 @@ def _system_prompt(request):
     return f"{SYSTEM_PROMPT}\n\nFacts you know about the user:\n{facts_text}"
 
 
-@login_required_json
-@rate_limit("chat", 30, 60)
-def chat(request):
-    """POST /api/chat/  {"message": str, "conversation_id"?: int,
-    "model"?: str, "agent"?: bool, "coding"?: bool,
-    "confirm_commands"?: bool} → {"reply", "conversation_id", "trace"}"""
+def _chat_context(request):
+    """Shared pre-flight for /api/chat/ and /api/chat/stream/.
+
+    Validates the body, enforces the coding kill switch, resolves
+    (and claims) the conversation and builds the provider message
+    list. Returns (error_response, body, user_text, conversation,
+    messages) — error_response is None when the caller may proceed.
+    Keeping ONE implementation means the streaming endpoint can never
+    drift weaker than the plain one.
+    """
     if request.method != "POST":
-        return JsonResponse({"error": "POST only"}, status=405)
+        return JsonResponse({"error": "POST only"}, status=405), None, "", None, []
     try:
         body = json.loads(request.body or b"{}")
     except json.JSONDecodeError:
-        return JsonResponse({"error": "invalid JSON"}, status=400)
+        return JsonResponse({"error": "invalid JSON"}, status=400), None, "", None, []
 
     user_text = (body.get("message") or "").strip()
     if not user_text:
-        return JsonResponse({"error": "message is required"}, status=400)
+        return JsonResponse({"error": "message is required"}, status=400), None, "", None, []
     if len(user_text) > MAX_MESSAGE_CHARS:
-        return JsonResponse(
-            {"error": f"Message too long (limit {MAX_MESSAGE_CHARS} characters)."},
-            status=400,
+        return (
+            JsonResponse(
+                {"error": f"Message too long (limit {MAX_MESSAGE_CHARS} characters)."},
+                status=400,
+            ),
+            None, "", None, [],
         )
 
     # Step 0 containment: coding execution is a server-side decision.
@@ -332,17 +341,23 @@ def chat(request):
     # here, before any agent or tool code runs.
     if body.get("coding"):
         if not coding_tools.execution_enabled():
-            return JsonResponse(
-                {"error": "Coding mode is disabled on this server."},
-                status=403,
+            return (
+                JsonResponse(
+                    {"error": "Coding mode is disabled on this server."},
+                    status=403,
+                ),
+                None, "", None, [],
             )
         if not body.get("confirm_commands"):
-            return JsonResponse(
-                {
-                    "error": "Coding mode runs commands on the server. "
-                    "Confirm the session first (confirm_commands)."
-                },
-                status=400,
+            return (
+                JsonResponse(
+                    {
+                        "error": "Coding mode runs commands on the server. "
+                        "Confirm the session first (confirm_commands)."
+                    },
+                    status=400,
+                ),
+                None, "", None, [],
             )
 
     conversation = None
@@ -366,19 +381,15 @@ def chat(request):
         + history
         + [{"role": "user", "content": user_text}]
     )
+    return None, body, user_text, conversation, messages
 
-    trace = []
-    if body.get("coding"):
-        reply, trace = agent.run_agent(
-            messages, body.get("model") or None, coding=True
-        )
-    elif body.get("agent"):
-        reply, trace = agent.run_agent(messages, body.get("model") or None)
-    else:
-        reply = ai.ask_ai(messages, model=body.get("model") or None)
-    if reply is None:
-        return JsonResponse({"error": "AI unavailable"}, status=502)
 
+def _persist_exchange(request, conversation, user_text, reply, trace):
+    """Save one finished exchange and harvest suggested memories.
+
+    Shared by the plain and streaming chat endpoints so both persist
+    identically. Returns the conversation (created here when None).
+    """
     if conversation is None:
         conversation = Conversation.objects.create(
             title=user_text[:60] or "New conversation",
@@ -414,10 +425,83 @@ def chat(request):
                 status=Memory.Status.SUGGESTED,
             )
             known.add(lowered)
+    return conversation
 
+
+@login_required_json
+@rate_limit("chat", 30, 60)
+def chat(request):
+    """POST /api/chat/  {"message": str, "conversation_id"?: int,
+    "model"?: str, "agent"?: bool, "coding"?: bool,
+    "confirm_commands"?: bool} → {"reply", "conversation_id", "trace"}"""
+    error, body, user_text, conversation, messages = _chat_context(request)
+    if error is not None:
+        return error
+
+    trace = []
+    if body.get("coding"):
+        reply, trace = agent.run_agent(
+            messages, body.get("model") or None, coding=True
+        )
+    elif body.get("agent"):
+        reply, trace = agent.run_agent(messages, body.get("model") or None)
+    else:
+        reply = ai.ask_ai(messages, model=body.get("model") or None)
+    if reply is None:
+        return JsonResponse({"error": "AI unavailable"}, status=502)
+
+    conversation = _persist_exchange(
+        request, conversation, user_text, reply, trace
+    )
     return JsonResponse(
         {"reply": reply, "conversation_id": conversation.pk, "trace": trace}
     )
+
+
+@login_required_json
+@rate_limit("chat", 30, 60)
+def chat_stream(request):
+    """POST /api/chat/stream/ — plain chat with a streamed reply.
+
+    Same validation, auth, CSRF, rate limit and persistence as
+    /api/chat/ (shared helpers above); the reply arrives as NDJSON
+    events, one per line:
+        {"type": "chunk", "text": "..."}        (zero or more)
+        {"type": "done", "conversation_id": N}  (success, at the end)
+        {"type": "error", "error": "AI unavailable"}
+    Agent and coding modes are NOT streamed — they keep using
+    /api/chat/ so their step traces stay atomic. Once the stream has
+    started the HTTP status is committed, so a provider that fails
+    before producing any text surfaces as an error EVENT, not a 502.
+    """
+    error, body, user_text, conversation, messages = _chat_context(request)
+    if error is not None:
+        return error
+    if body.get("agent") or body.get("coding"):
+        return JsonResponse(
+            {"error": "Agent and coding modes use /api/chat/."},
+            status=400,
+        )
+
+    def events():
+        parts = []
+        for chunk in ai.ask_ai_stream(messages, model=body.get("model") or None):
+            parts.append(chunk)
+            yield json.dumps({"type": "chunk", "text": chunk}) + "\n"
+        reply = "".join(parts)
+        if not reply:
+            yield json.dumps(
+                {"type": "error", "error": "AI unavailable"}
+            ) + "\n"
+            return
+        saved = _persist_exchange(request, conversation, user_text, reply, [])
+        yield json.dumps(
+            {"type": "done", "conversation_id": saved.pk, "trace": []}
+        ) + "\n"
+
+    response = StreamingHttpResponse(events(), content_type="application/x-ndjson")
+    response["X-Accel-Buffering"] = "no"
+    return response
 
 
 @login_required_json

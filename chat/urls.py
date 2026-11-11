@@ -16,6 +16,7 @@ urlpatterns = [
     path("auth/logout/", views.logout_view, name="auth-logout"),
     path("models/", views.model_catalog, name="model-catalog"),
     path("chat/", views.chat, name="chat"),
+    path("chat/stream/", views.chat_stream, name="chat-stream"),
     path("conversations/", views.conversation_list, name="conversation-list"),
     path(
         "conversations/<int:pk>/",
