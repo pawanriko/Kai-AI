@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 // Bottom bar: provider-grouped model picker, Agent mode toggle,
 // message box, Send. Enter sends, Shift+Enter makes a new line.
@@ -16,10 +16,25 @@ export default function ChatInput({
   sending,
 }) {
   const [text, setText] = useState('')
+  // Phase 2.2: synchronous in-flight guard. The `sending` prop
+  // alone cannot stop a double submit: it only changes on the next
+  // render, so two fast clicks (or Enter + click) both read the
+  // stale `false` and both fire onSend — the live duplicate prompt
+  // on 2026-11-11. A ref flips immediately, inside the same tick,
+  // so the second submit in the same tick is blocked. It re-arms
+  // when the parent reports the send finished (sending flips
+  // false); App.jsx sets sending=true synchronously in handleSend,
+  // so the guard cannot get stuck armed.
+  const submittingRef = useRef(false)
+
+  useEffect(() => {
+    if (!sending) submittingRef.current = false
+  }, [sending])
 
   function submit() {
     const value = text.trim()
-    if (!value || sending) return
+    if (!value || sending || submittingRef.current) return
+    submittingRef.current = true
     setText('')
     onSend(value)
   }
