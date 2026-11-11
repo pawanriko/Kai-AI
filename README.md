@@ -74,7 +74,7 @@ several workers requires a shared cache backend such as Redis
 | POST | `/api/auth/login/` · `/api/auth/logout/` | session in/out |
 | GET | `/api/models/` | provider + model catalogue for the picker |
 | POST | `/api/chat/` | `{message, conversation_id?, model?, agent?, coding?, confirm_commands?}` → `{reply, conversation_id, trace}` |
-| POST | `/api/chat/stream/` | same body (plain chat only) → NDJSON stream of `{type: "chunk", text}` events, ending with `{type: "done", conversation_id}` |
+| POST | `/api/chat/stream/` | same body (plain chat only) → NDJSON stream of `{type: "chunk", text}` events, ending with `{type: "done", conversation_id}`; if the provider fails mid-reply, an `{type: "error", interrupted: true}` event instead — the partial reply is saved flagged `incomplete`, labelled in the UI, and kept out of future AI context |
 | GET | `/api/conversations/` | list conversations |
 | GET | `/api/conversations/<id>/` | conversation + messages |
 | DELETE | `/api/conversations/<id>/delete/` | delete conversation |

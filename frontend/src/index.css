@@ -239,6 +239,14 @@ body {
   word-break: break-word;
 }
 
+/* Phase 2.1: the interrupted-reply label under a partial bubble. */
+.bubble-note {
+  margin-top: 0.45rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #b45309;
+}
+
 .bubble.thinking {
   opacity: 0.6;
 }

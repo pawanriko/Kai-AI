@@ -104,6 +104,11 @@ export function sendChat(
 // onChunk fires per text piece so the UI can grow the reply bubble
 // live. Resolves with the done event; throws on any failure (a
 // pre-stream HTTP error, or the error event once streaming began).
+// Phase 2.1: an error event carrying "interrupted": true means the
+// provider died mid-reply and the server SAVED the partial text
+// flagged incomplete — the thrown error then has .interrupted and
+// .conversationId set, so the UI keeps the bubble and labels it
+// instead of dropping it as if nothing had been saved.
 export async function sendChatStream(message, conversationId, model, onChunk) {
   const response = await fetch('/api/chat/stream/', {
     method: 'POST',
@@ -144,7 +149,14 @@ export async function sendChatStream(message, conversationId, model, onChunk) {
       const event = JSON.parse(line)
       if (event.type === 'chunk') onChunk(event.text)
       else if (event.type === 'done') doneEvent = event
-      else if (event.type === 'error') throw new Error(event.error)
+      else if (event.type === 'error') {
+        const error = new Error(event.error)
+        if (event.interrupted) {
+          error.interrupted = true
+          error.conversationId = event.conversation_id
+        }
+        throw error
+      }
     }
   }
   if (!doneEvent) throw new Error('Stream ended unexpectedly')

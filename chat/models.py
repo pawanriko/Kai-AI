@@ -56,10 +56,25 @@ class Message(models.Model):
         USER = "user", "User"
         ASSISTANT = "assistant", "Assistant"
 
+    class Status(models.TextChoices):
+        # COMPLETE is the historical norm: every message saved before
+        # Phase 2.1 gets it by default (migration 0005). INCOMPLETE is
+        # set only for an assistant reply whose stream was interrupted
+        # mid-generation (Phase 2.1): the partial text is kept for the
+        # record and shown labelled in the UI, but it is never treated
+        # as a finished answer — it stays out of future AI context.
+        COMPLETE = "complete", "Complete"
+        INCOMPLETE = "incomplete", "Incomplete"
+
     conversation = models.ForeignKey(
         Conversation, on_delete=models.CASCADE, related_name="messages"
     )
     role = models.CharField(max_length=16, choices=Role.choices)
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.COMPLETE,
+    )
     content = models.TextField()
     # Agent runs record their tool steps here: [{tool, args, result}].
     # Plain chat messages simply keep the empty list.

@@ -448,16 +448,27 @@ def _stream(provider, messages, model):
         yield from _stream_openai(provider, messages, model)
 
 
+class StreamInterrupted(Exception):
+    """A provider failed AFTER producing at least one chunk.
+
+    Raised by ask_ai_stream instead of silently ending the reply:
+    the caller (the streaming endpoint) must be able to tell an
+    interrupted reply apart from a completed one, so the partial
+    text is never persisted or presented as a successful answer.
+    """
+
+
 def ask_ai_stream(messages, model=None):
     """Streaming twin of ask_ai: yields reply text chunks.
 
     Same attempt order and fallback rules as ask_ai, with one honest
     difference: fallback can only happen BEFORE the first chunk. Once
     a provider has produced text, the stream is committed to it — a
-    mid-stream failure just ends the reply early instead of splicing
-    in a different model's continuation. Yields nothing at all when
-    every attempt fails before producing text (the caller then
-    reports 'AI unavailable', exactly like ask_ai returning None).
+    mid-stream failure raises StreamInterrupted instead of splicing
+    in a different model's continuation or silently ending the reply
+    (Phase 2.1). Yields nothing at all when every attempt fails
+    before producing text (the caller then reports 'AI
+    unavailable', exactly like ask_ai returning None).
     """
     provider, model_id = parse_choice(model)
     pinned = os.environ.get("AI_PROVIDER", "").strip().lower()
@@ -490,6 +501,13 @@ def ask_ai_stream(messages, model=None):
             yield from stream
         except Exception as exc:
             _log_failure(attempt_provider, exc)
+            # The reply has already begun, so falling back would
+            # splice two models together — and silently returning
+            # would let the caller save the partial text as a
+            # finished answer. Signal the interruption instead.
+            raise StreamInterrupted(
+                f"{attempt_provider} stream failed mid-reply"
+            ) from exc
         return
 
 

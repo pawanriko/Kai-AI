@@ -1,6 +1,7 @@
 """API tests. The AI call is mocked — tests never touch the network."""
 
 import json
+import os
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -887,3 +888,216 @@ class StreamingChatTests(LoggedInTestCase):
             content_type="application/json",
         )
         self.assertEqual(response.status_code, 403)
+
+    # --- Phase 2.1: interrupted streams ---
+
+    def _interrupted_stream(self, chunks):
+        """A provider stream that yields `chunks` and then dies
+        mid-reply, signalled exactly the way ai.ask_ai_stream now
+        signals it (StreamInterrupted, never a silent end)."""
+        from . import ai
+
+        def gen():
+            yield from chunks
+            raise ai.StreamInterrupted("provider died mid-reply")
+
+        return gen()
+
+    def test_failure_after_one_chunk_saves_incomplete_no_done(self):
+        with mock.patch(
+            "chat.views.ai.ask_ai_stream",
+            return_value=self._interrupted_stream(["Partial "]),
+        ):
+            response = self.client.post(
+                "/api/chat/stream/",
+                data=json.dumps({"message": "say hi"}),
+                content_type="application/json",
+            )
+            events = self._stream_body(response)
+        self.assertEqual([e["type"] for e in events], ["chunk", "error"])
+        self.assertTrue(events[1]["interrupted"])
+        self.assertEqual(events[1]["error"], "AI response interrupted")
+        assistant = Message.objects.get(role=Message.Role.ASSISTANT)
+        self.assertEqual(assistant.content, "Partial ")
+        self.assertEqual(assistant.status, Message.Status.INCOMPLETE)
+        self.assertEqual(
+            events[1]["conversation_id"], assistant.conversation.pk
+        )
+
+    def test_failure_after_multiple_chunks_saves_joined_partial(self):
+        with mock.patch(
+            "chat.views.ai.ask_ai_stream",
+            return_value=self._interrupted_stream(["one ", "two ", "three"]),
+        ):
+            response = self.client.post(
+                "/api/chat/stream/",
+                data=json.dumps({"message": "count"}),
+                content_type="application/json",
+            )
+            events = self._stream_body(response)
+        self.assertEqual(
+            [e["type"] for e in events],
+            ["chunk", "chunk", "chunk", "error"],
+        )
+        assistant = Message.objects.get(role=Message.Role.ASSISTANT)
+        self.assertEqual(assistant.content, "one two three")
+        self.assertEqual(assistant.status, Message.Status.INCOMPLETE)
+
+    def test_completed_stream_saves_status_complete(self):
+        with mock.patch(
+            "chat.views.ai.ask_ai_stream", return_value=iter(["Hi"])
+        ), mock.patch("chat.views.ai.extract_facts", return_value=[]):
+            response = self.client.post(
+                "/api/chat/stream/",
+                data=json.dumps({"message": "say hi"}),
+                content_type="application/json",
+            )
+            events = self._stream_body(response)
+        self.assertEqual(events[-1]["type"], "done")
+        assistant = Message.objects.get(role=Message.Role.ASSISTANT)
+        self.assertEqual(assistant.status, Message.Status.COMPLETE)
+
+    def test_interrupted_exchange_harvests_no_memories(self):
+        with mock.patch(
+            "chat.views.ai.ask_ai_stream",
+            return_value=self._interrupted_stream(["Partial "]),
+        ), mock.patch(
+            "chat.views.ai.extract_facts", return_value=["some fact"]
+        ):
+            response = self.client.post(
+                "/api/chat/stream/",
+                data=json.dumps({"message": "remember this"}),
+                content_type="application/json",
+            )
+            self._stream_body(response)
+        self.assertEqual(Memory.objects.count(), 0)
+
+    def test_incomplete_reply_excluded_from_future_context(self):
+        conversation = Conversation.objects.create(
+            title="t", user=self.user
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.USER,
+            content="first question",
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content="HALF AN ANSWER",
+            status=Message.Status.INCOMPLETE,
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role=Message.Role.ASSISTANT,
+            content="a full answer",
+        )
+        captured = {}
+
+        def fake_ask(messages, model=None):
+            captured["messages"] = messages
+            return "ok"
+
+        with mock.patch(
+            "chat.views.ai.ask_ai", side_effect=fake_ask
+        ), mock.patch("chat.views.ai.extract_facts", return_value=[]):
+            response = post_json(
+                self.client,
+                "/api/chat/",
+                {
+                    "message": "next question",
+                    "conversation_id": conversation.pk,
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        contents = [m["content"] for m in captured["messages"]]
+        self.assertIn("first question", contents)
+        self.assertIn("a full answer", contents)
+        self.assertNotIn("HALF AN ANSWER", contents)
+
+
+class AiStreamFailureTests(TestCase):
+    """Phase 2.1 semantics inside ai.ask_ai_stream itself: provider
+    fallback is a BEFORE-the-first-chunk privilege only. After text
+    has flowed, a failure raises StreamInterrupted and no other
+    provider is attempted — two models are never spliced."""
+
+    def _attempt(self, streams_by_provider):
+        from . import ai
+
+        calls = []
+
+        def fake_stream(provider, messages, model):
+            calls.append(provider)
+            return streams_by_provider[provider]()
+
+        with mock.patch.dict(os.environ, {"AI_PROVIDER": ""}), (
+            mock.patch.object(ai, "provider_configured", return_value=True)
+        ), mock.patch.object(ai, "_stream", side_effect=fake_stream):
+            chunks = []
+            error = None
+            try:
+                for chunk in ai.ask_ai_stream([{"role": "user", "content": "hi"}]):
+                    chunks.append(chunk)
+            except ai.StreamInterrupted as exc:
+                error = exc
+        return chunks, calls, error
+
+    @staticmethod
+    def _dead():
+        raise RuntimeError("provider down")
+        yield  # pragma: no cover — makes this a generator
+
+    def test_failure_before_first_chunk_falls_back(self):
+        def empty():
+            return iter([])
+
+        chunks, calls, error = self._attempt(
+            {
+                "groq": self._dead,
+                "openrouter": lambda: iter(["fallback ", "reply"]),
+                "nvidia": empty,
+                "deepseek": empty,
+                "gemini": empty,
+            }
+        )
+        self.assertIsNone(error)
+        self.assertEqual(chunks, ["fallback ", "reply"])
+        self.assertEqual(calls[:2], ["groq", "openrouter"])
+
+    def test_failure_after_first_chunk_raises_and_never_falls_back(self):
+        def flaky():
+            yield "part"
+            raise RuntimeError("connection reset")
+
+        def empty():
+            return iter([])
+
+        chunks, calls, error = self._attempt(
+            {
+                "groq": flaky,
+                "openrouter": lambda: iter(["MUST NOT BE USED"]),
+                "nvidia": empty,
+                "deepseek": empty,
+                "gemini": empty,
+            }
+        )
+        self.assertEqual(chunks, ["part"])
+        self.assertIsNotNone(error)
+        self.assertEqual(calls, ["groq"])
+
+    def test_all_providers_dead_before_text_yields_nothing(self):
+        def empty():
+            return iter([])
+
+        chunks, calls, error = self._attempt(
+            {
+                "groq": self._dead,
+                "openrouter": self._dead,
+                "nvidia": empty,
+                "deepseek": empty,
+                "gemini": empty,
+            }
+        )
+        self.assertIsNone(error)
+        self.assertEqual(chunks, [])

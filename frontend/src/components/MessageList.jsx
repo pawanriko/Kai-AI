@@ -31,6 +31,11 @@ export default function MessageList({ messages, sending }) {
               {m.role === 'user' ? 'YOU' : 'KAI'}
             </div>
             <div className="bubble-text">{m.content}</div>
+            {(m.incomplete || m.status === 'incomplete') && (
+              <div className="bubble-note">
+                ⚠️ Response interrupted — incomplete
+              </div>
+            )}
             {m.trace && m.trace.length > 0 && (
               <details className="trace">
                 <summary>Agent steps ({m.trace.length})</summary>

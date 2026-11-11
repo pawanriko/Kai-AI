@@ -375,6 +375,14 @@ def _chat_context(request):
         history = [
             {"role": m.role, "content": m.content}
             for m in conversation.messages.all()
+            # An interrupted (Phase 2.1) assistant reply is partial
+            # text, not a finished answer: never feed it back to the
+            # AI as trusted context. The user's own messages around
+            # it still count.
+            if not (
+                m.role == Message.Role.ASSISTANT
+                and m.status == Message.Status.INCOMPLETE
+            )
         ][-MAX_HISTORY_MESSAGES:]
     messages = (
         [{"role": "system", "content": _system_prompt(request)}]
@@ -384,11 +392,19 @@ def _chat_context(request):
     return None, body, user_text, conversation, messages
 
 
-def _persist_exchange(request, conversation, user_text, reply, trace):
-    """Save one finished exchange and harvest suggested memories.
+def _persist_exchange(
+    request, conversation, user_text, reply, trace,
+    status=Message.Status.COMPLETE,
+):
+    """Save one exchange and (for completed replies) harvest memories.
 
     Shared by the plain and streaming chat endpoints so both persist
     identically. Returns the conversation (created here when None).
+    `status` is Message.Status.INCOMPLETE only when the streaming
+    endpoint saves a partial reply after a mid-stream provider
+    failure (Phase 2.1) — the text is kept, explicitly flagged, and
+    no facts are harvested from it: partial text is not a trustworthy
+    source about the user.
     """
     if conversation is None:
         conversation = Conversation.objects.create(
@@ -403,6 +419,7 @@ def _persist_exchange(request, conversation, user_text, reply, trace):
         role=Message.Role.ASSISTANT,
         content=reply,
         trace=trace,
+        status=status,
     )
     conversation.save(update_fields=["updated_at"])
 
@@ -410,7 +427,7 @@ def _persist_exchange(request, conversation, user_text, reply, trace):
     # they reach future system prompts only after the user confirms
     # them in the Memory panel.
     visible = _visible_memories(request)
-    if visible.count() < MAX_MEMORIES_PER_USER:
+    if status == Message.Status.COMPLETE and visible.count() < MAX_MEMORIES_PER_USER:
         known = {m.fact.lower() for m in visible}
         for fact in ai.extract_facts(user_text, reply):
             fact = fact.strip()[:MAX_FACT_CHARS]
@@ -469,6 +486,11 @@ def chat_stream(request):
         {"type": "chunk", "text": "..."}        (zero or more)
         {"type": "done", "conversation_id": N}  (success, at the end)
         {"type": "error", "error": "AI unavailable"}
+        {"type": "error", "error": "AI response interrupted",
+         "interrupted": true, "conversation_id": N}
+            (Phase 2.1: the provider failed AFTER producing text.
+            The partial reply has been saved with status INCOMPLETE —
+            never as a finished answer — and no 'done' follows.)
     Agent and coding modes are NOT streamed — they keep using
     /api/chat/ so their step traces stay atomic. Once the stream has
     started the HTTP status is committed, so a provider that fails
@@ -485,9 +507,34 @@ def chat_stream(request):
 
     def events():
         parts = []
-        for chunk in ai.ask_ai_stream(messages, model=body.get("model") or None):
-            parts.append(chunk)
-            yield json.dumps({"type": "chunk", "text": chunk}) + "\n"
+        try:
+            for chunk in ai.ask_ai_stream(
+                messages, model=body.get("model") or None
+            ):
+                parts.append(chunk)
+                yield json.dumps({"type": "chunk", "text": chunk}) + "\n"
+        except ai.StreamInterrupted:
+            # Provider died mid-reply: persist the partial text
+            # flagged INCOMPLETE and report the interruption. The
+            # client keeps the partial bubble, labelled — it is
+            # never presented as a completed answer.
+            saved = _persist_exchange(
+                request,
+                conversation,
+                user_text,
+                "".join(parts),
+                [],
+                status=Message.Status.INCOMPLETE,
+            )
+            yield json.dumps(
+                {
+                    "type": "error",
+                    "error": "AI response interrupted",
+                    "interrupted": True,
+                    "conversation_id": saved.pk,
+                }
+            ) + "\n"
+            return
         reply = "".join(parts)
         if not reply:
             yield json.dumps(
@@ -537,6 +584,7 @@ def conversation_detail(request, pk):
                     "id": m.pk,
                     "role": m.role,
                     "content": m.content,
+                    "status": m.status,
                     "trace": m.trace,
                     "created_at": m.created_at.isoformat(),
                 }

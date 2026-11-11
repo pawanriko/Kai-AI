@@ -188,6 +188,60 @@ describe('api.js auth + CSRF', () => {
     ).rejects.toThrow('AI unavailable')
   })
 
+  // Phase 2.1: interrupted streams. The server saves the partial
+  // reply flagged incomplete and ends with an error event carrying
+  // "interrupted": true — the rejection must carry those flags so
+  // the UI keeps and labels the partial bubble.
+  function streamFetch(lines, { failAtRead = -1 } = {}) {
+    const encoder = new TextEncoder()
+    let i = 0
+    return mockFetch({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (i === failAtRead) throw new Error('network drop')
+            return i < lines.length
+              ? { value: encoder.encode(lines[i++]), done: false }
+              : { value: undefined, done: true }
+          },
+        }),
+      },
+    })
+  }
+
+  it('flags an interrupted error event and keeps the chunks seen', async () => {
+    streamFetch([
+      '{"type":"chunk","text":"Partial "}\n',
+      '{"type":"error","error":"AI response interrupted","interrupted":true,"conversation_id":9}\n',
+    ])
+    const seen = []
+    const err = await sendChatStream('hi', null, null, (t) =>
+      seen.push(t)
+    ).catch((e) => e)
+    expect(seen.join('')).toBe('Partial ')
+    expect(err.message).toBe('AI response interrupted')
+    expect(err.interrupted).toBe(true)
+    expect(err.conversationId).toBe(9)
+  })
+
+  it('rejects when the stream ends without a done event', async () => {
+    streamFetch(['{"type":"chunk","text":"Half"}\n'])
+    await expect(
+      sendChatStream('hi', null, null, () => {})
+    ).rejects.toThrow('Stream ended unexpectedly')
+  })
+
+  it('rejects when the transport drops mid-stream', async () => {
+    streamFetch(['{"type":"chunk","text":"Half"}\n'], { failAtRead: 1 })
+    const seen = []
+    await expect(
+      sendChatStream('hi', null, null, (t) => seen.push(t))
+    ).rejects.toThrow('network drop')
+    expect(seen.join('')).toBe('Half')
+  })
+
   it('rejects a suggested memory and treats the 204 as success', async () => {
     const fetchMock = mockFetch({
       ok: true,

@@ -182,9 +182,31 @@ export default function App() {
       refreshConversations()
     } catch (err) {
       if (sessionExpired(err)) return
-      // A stream that died mid-reply leaves a partial bubble behind;
-      // drop it so the transcript never shows a reply the server
-      // did not save.
+      if (err.interrupted) {
+        // Phase 2.1: the provider died mid-reply and the server
+        // saved the partial text flagged incomplete. Keep the bubble
+        // and label it — dropping it would hide a message the saved
+        // transcript actually contains, and keeping it unlabelled
+        // would fake a finished answer.
+        setMessages((prev) => {
+          const last = prev[prev.length - 1]
+          if (!last || last.role !== 'assistant') return prev
+          const next = [...prev]
+          next[next.length - 1] = { ...last, incomplete: true }
+          return next
+        })
+        if (err.conversationId) setActiveId(err.conversationId)
+        refreshConversations()
+        setError(
+          '⚠️ Response interrupted — the partial reply above is saved ' +
+            'and marked incomplete. Ask again to retry.'
+        )
+        return
+      }
+      // Any other stream failure (transport drop, missing done
+      // event, pre-stream error): the server saved nothing, so drop
+      // the partial bubble — the transcript must never show a reply
+      // the server did not save.
       setMessages((prev) => {
         const last = prev[prev.length - 1]
         return last && last.role === 'assistant' ? prev.slice(0, -1) : prev
