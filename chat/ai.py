@@ -53,11 +53,16 @@ PROVIDERS = {
             ("nvidia/nemotron-3-ultra-550b-a55b:free", "Nemotron 3 Ultra 550B (free)"),
             ("google/gemma-4-31b-it:free", "Gemma 4 31B (free)"),
             ("cohere/north-mini-code:free", "North Mini Code (free)"),
+            # Phase 2.2: extra free fallbacks, each ID verified live
+            # against OpenRouter's models list (2026-11-12) before
+            # adding — a dead ID here fails the whole chain silently
+            # (see the Opus 4.6 404 on 2026-11-11).
+            ("google/gemma-4-26b-a4b-it:free", "Gemma 4 26B (free)"),
+            ("nvidia/nemotron-3.5-lightning:free", "Nemotron 3.5 Lightning (free)"),
             ("meta/muse-ember", "Muse Ember"),
             ("deepseek/deepseek-v3.2", "DeepSeek V3.2"),
             ("tencent/hy4", "Hy4"),
             ("mistralai/mistral-large-4-0", "Mistral Large 4"),
-            ("anthropic/claude-opus-4-6", "Opus 4.6"),
         ],
     },
     "nvidia": {
@@ -346,6 +351,13 @@ def ask_ai(messages, model=None):
         return None
 
     attempts = [(provider, model_id)]
+    if default_model(provider) != model_id:
+        # Phase 2.2: a dead picked model must not cost the whole
+        # provider — retry it with the provider's default before
+        # moving on. (The Opus 4.6 404 took OpenRouter's free
+        # models out of the chain with it: the picked provider was
+        # never retried with another model.)
+        attempts.append((provider, default_model(provider)))
     for other in FALLBACK_ORDER:
         if other != provider:
             attempts.append((other, default_model(other)))
@@ -480,7 +492,12 @@ def ask_ai_stream(messages, model=None):
         ]
         attempts = [(pinned, mid) for mid in models]
     else:
-        attempts = [(provider, model_id)] + [
+        attempts = [(provider, model_id)]
+        if default_model(provider) != model_id:
+            # Phase 2.2: same retry as ask_ai — a dead picked model
+            # must not cost the whole provider.
+            attempts.append((provider, default_model(provider)))
+        attempts += [
             (other, default_model(other))
             for other in FALLBACK_ORDER
             if other != provider

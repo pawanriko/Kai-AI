@@ -192,6 +192,42 @@ class ProviderRoutingTests(TestCase):
         reply = ai.ask_ai([{"role": "user", "content": "hi"}])
         self.assertEqual(reply, "from openrouter")
 
+    @mock.patch.dict(
+        "os.environ",
+        {
+            "GROQ_API_KEY": "g",
+            "OPENROUTER_API_KEY": "o",
+            "GEMINI_API_KEY": "gem",
+        },
+    )
+    @mock.patch("chat.ai._ask")
+    def test_ask_ai_invalid_picked_model_falls_back(self, ask):
+        """Phase 2.2: a picked model that no longer exists (the
+        Opus 4.6 404) must not end the request — the atomic path
+        falls back to the next provider exactly like the stream."""
+        from . import ai
+
+        ask.side_effect = [None, None, "recovered from groq"]
+        reply = ai.ask_ai(
+            [{"role": "user", "content": "hi"}],
+            model="openrouter::anthropic/claude-opus-4-6",
+        )
+        self.assertEqual(reply, "recovered from groq")
+        # Phase 2.2: the dead pick is followed by the picked
+        # provider's default before the chain moves on.
+        self.assertEqual(
+            [c.args[0] for c in ask.call_args_list],
+            ["openrouter", "openrouter", "groq"],
+        )
+        self.assertEqual(
+            [c.args[2] for c in ask.call_args_list],
+            [
+                "anthropic/claude-opus-4-6",
+                "nvidia/nemotron-3-ultra-550b-a55b:free",
+                "llama-3.3-70b-versatile",
+            ],
+        )
+
     @mock.patch.dict("os.environ", {"GEMINI_API_KEY": "gem"})
     @mock.patch("chat.ai._post_json")
     def test_ask_ai_gemini_adapter(self, post):
@@ -1047,6 +1083,105 @@ class AiStreamFailureTests(TestCase):
     def _dead():
         raise RuntimeError("provider down")
         yield  # pragma: no cover — makes this a generator
+
+    @staticmethod
+    def _http_error(code):
+        """A generator that raises a real urllib HTTPError, the way
+        _open_stream does when a provider answers 4xx/5xx."""
+
+        from urllib.error import HTTPError
+
+        def gen():
+            raise HTTPError(
+                "https://example.invalid/", code,
+                f"HTTP Error {code}", {}, None,
+            )
+            yield  # pragma: no cover — makes this a generator
+
+        return gen
+
+    def _attempt_by_model(self, streams_by_model, choice=None):
+        """Like _attempt, but keyed by (provider, model) so a test
+        can replay a real production chain — e.g. a picked model
+        that 404s, then a 403, then a 429, then a recovery."""
+        from . import ai
+
+        calls = []
+
+        def fake_stream(provider, messages, model):
+            calls.append((provider, model))
+            return streams_by_model[(provider, model)]()
+
+        with mock.patch.dict(os.environ, {"AI_PROVIDER": ""}), (
+            mock.patch.object(ai, "provider_configured", return_value=True)
+        ), mock.patch.object(ai, "_stream", side_effect=fake_stream):
+            chunks = []
+            error = None
+            try:
+                for chunk in ai.ask_ai_stream(
+                    [{"role": "user", "content": "hi"}], model=choice
+                ):
+                    chunks.append(chunk)
+            except ai.StreamInterrupted as exc:
+                error = exc
+        return chunks, calls, error
+
+    def test_production_chain_invalid_model_404_then_403_then_429_recovers(self):
+        """Phase 2.2 regression: the exact 2026-11-11 live failure.
+        Picked model 404s (dead catalogue ID), Groq 403s, the free
+        default 429s — the chain must keep going and answer from
+        Gemini instead of dying with 'AI unavailable'. One failed
+        provider never terminates the chain."""
+        chunks, calls, error = self._attempt_by_model(
+            {
+                ("openrouter", "anthropic/claude-opus-4-6"): self._http_error(404),
+                ("groq", "llama-3.3-70b-versatile"): self._http_error(403),
+                (
+                    "openrouter",
+                    "nvidia/nemotron-3-ultra-550b-a55b:free",
+                ): self._http_error(429),
+                ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1.5"): (
+                    lambda: iter([])
+                ),
+                ("deepseek", "deepseek-chat"): lambda: iter([]),
+                ("gemini", "gemini-3.8-flash"): lambda: iter(["recovered"]),
+            },
+            choice="openrouter::anthropic/claude-opus-4-6",
+        )
+        self.assertIsNone(error)
+        self.assertEqual(chunks, ["recovered"])
+        # Phase 2.2: after the dead pick, the chain retries the
+        # picked provider's DEFAULT (Nemotron) before moving on —
+        # the pre-2.2 chain skipped OpenRouter entirely here.
+        self.assertEqual(
+            calls,
+            [
+                ("openrouter", "anthropic/claude-opus-4-6"),
+                ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free"),
+                ("groq", "llama-3.3-70b-versatile"),
+                ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1.5"),
+                ("deepseek", "deepseek-chat"),
+                ("gemini", "gemini-3.8-flash"),
+            ],
+        )
+
+    def test_catalogue_has_no_dead_opus_and_has_new_free_models(self):
+        """Phase 2.2: the dead Opus ID must never come back, and the
+        two new free fallbacks must be present with their exact
+        live-verified IDs. The OpenRouter default stays the
+        Nemotron 3 Ultra free model."""
+        from . import ai
+
+        ids = [
+            m["id"] for p in ai.catalog() for m in p["models"]
+        ]
+        self.assertNotIn("anthropic/claude-opus-4-6", ids)
+        self.assertIn("google/gemma-4-26b-a4b-it:free", ids)
+        self.assertIn("nvidia/nemotron-3.5-lightning:free", ids)
+        self.assertEqual(
+            ai.default_model("openrouter"),
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+        )
 
     def test_failure_before_first_chunk_falls_back(self):
         def empty():
