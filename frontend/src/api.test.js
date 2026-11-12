@@ -12,6 +12,7 @@ import {
   addMemory,
   confirmMemory,
   exportMemories,
+  exportReport,
   getMe,
   listConversations,
   listDuplicates,
@@ -335,6 +336,20 @@ describe('api.js auth + CSRF', () => {
     expect(result).toBe(blob)
     expect(fetchMock.mock.calls[0][0]).toBe(
       '/api/memories/export/?format=md&project=kai'
+    )
+  })
+
+  it('exports a conversation report as a blob', async () => {
+    const blob = new Blob(['# report'])
+    const fetchMock = mockFetch({
+      ok: true,
+      status: 200,
+      blob: async () => blob,
+    })
+    const result = await exportReport(12)
+    expect(result).toBe(blob)
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/conversations/12/report/'
     )
   })
 })

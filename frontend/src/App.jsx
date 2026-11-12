@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   deleteConversation,
+  exportReport,
   getConversation,
   getMe,
   listConversations,
@@ -188,6 +189,28 @@ export default function App() {
     refreshConversations()
   }
 
+  // Phase 5: download the open conversation as a Markdown research
+  // report — sources come from the stored agent traces, so a report
+  // only ever cites pages KAI actually used.
+  async function downloadReport() {
+    if (!activeId) return
+    try {
+      const blob = await exportReport(activeId)
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `kai-research-${activeId}.md`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      if (!sessionExpired(err)) {
+        setError('Could not download the report.')
+      }
+    }
+  }
+
   function handleCoding(value) {
     // Enabling CODE mode is the explicit confirmation the server
     // requires (confirm_commands): commands will run inside KAI's
@@ -322,6 +345,13 @@ export default function App() {
         ) : (
           <>
             {error && <div className="error-box">{error}</div>}
+            {activeId && (
+              <div className="report-row">
+                <button type="button" onClick={downloadReport}>
+                  Download research report
+                </button>
+              </div>
+            )}
             <MessageList
               messages={messages}
               sending={

@@ -2,6 +2,8 @@
 
 import json
 import os
+import socket
+import urllib.error
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -994,6 +996,335 @@ class MemoryUpgradeTests(LoggedInTestCase):
         memory = Memory.objects.get()
         self.assertEqual(memory.origin, Memory.Origin.INFERRED)
         self.assertEqual(memory.status, Memory.Status.SUGGESTED)
+
+
+# ---------------------------------------------------------------- Phase 5
+
+class ResearchTests(TestCase):
+    DDG_HTML = """
+    <html><body>
+    <a rel="nofollow" class="result__a"
+       href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdjango&amp;rut=abc">Django 5.2 notes</a>
+    <a class="result__snippet" href="#">Django 5.2 is out with new features.</a>
+    <a rel="nofollow" class="result__a"
+       href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.example.org%2Fguide">Guide</a>
+    <a class="result__snippet" href="#">The official guide.</a>
+    </body></html>
+    """
+
+    def _fake_response(self, body, content_type="text/html"):
+        response = mock.MagicMock()
+        response.read.return_value = body
+        response.headers = {"Content-Type": content_type}
+        response.__enter__.return_value = response
+        return response
+
+    def _public_dns(self):
+        # example.com resolves to a public address.
+        return [(socket.AF_INET, None, None, None, ("93.184.216.34", 0))]
+
+    @mock.patch.dict(os.environ, {"TAVILY_API_KEY": ""})
+    @mock.patch("chat.research.urllib.request.urlopen")
+    def test_duckduckgo_search_parses_links_and_snippets(self, urlopen):
+        from . import research
+
+        urlopen.return_value = self._fake_response(
+            self.DDG_HTML.encode("utf-8")
+        )
+        result = research.web_search("django 5.2")
+        self.assertIn("1. Django 5.2 notes", result)
+        self.assertIn("https://example.com/django", result)
+        self.assertIn("Django 5.2 is out", result)
+        self.assertIn("2. Guide", result)
+        self.assertIn("https://docs.example.org/guide", result)
+        request = urlopen.call_args[0][0]
+        self.assertIn("html.duckduckgo.com", request.full_url)
+
+    @mock.patch.dict(os.environ, {"TAVILY_API_KEY": ""})
+    @mock.patch("chat.research.urllib.request.urlopen")
+    def test_duckduckgo_failure_is_an_error_string(self, urlopen):
+        from . import research
+
+        urlopen.side_effect = urllib.error.URLError("blocked")
+        self.assertIn("Web search error", research.web_search("django"))
+        self.assertIn(
+            "required", research.web_search("  ").lower()
+        )
+
+    @mock.patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test-key"})
+    @mock.patch("chat.research.urllib.request.urlopen")
+    def test_tavily_search_used_when_key_set(self, urlopen):
+        from . import research
+
+        urlopen.return_value = self._fake_response(
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "title": "Tavily hit",
+                            "url": "https://tavily.example/hit",
+                            "content": "Snippet from Tavily.",
+                        }
+                    ]
+                }
+            ).encode("utf-8"),
+            content_type="application/json",
+        )
+        result = research.web_search("django")
+        self.assertIn("Tavily hit", result)
+        self.assertIn("https://tavily.example/hit", result)
+        request = urlopen.call_args[0][0]
+        self.assertIn("api.tavily.com", request.full_url)
+        self.assertEqual(
+            request.get_header("Authorization"), "Bearer tvly-test-key"
+        )
+
+    @mock.patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test-key"})
+    @mock.patch("chat.research.urllib.request.urlopen")
+    def test_tavily_failure_falls_back_to_duckduckgo(self, urlopen):
+        from . import research
+
+        urlopen.side_effect = [
+            urllib.error.HTTPError(
+                "https://api.tavily.com/search", 500, "boom", {}, None
+            ),
+            self._fake_response(self.DDG_HTML.encode("utf-8")),
+        ]
+        result = research.web_search("django")
+        self.assertIn("https://example.com/django", result)
+
+    @mock.patch("chat.research.socket.getaddrinfo")
+    def test_url_guard_blocks_private_and_local_hosts(self, getaddrinfo):
+        from . import research
+
+        getaddrinfo.return_value = [
+            (socket.AF_INET, None, None, None, ("127.0.0.1", 0))
+        ]
+        self.assertIn(
+            "non-public", research.fetch_page("http://localhost/admin")
+        )
+        getaddrinfo.return_value = [
+            (socket.AF_INET, None, None, None, ("169.254.169.254", 0))
+        ]
+        self.assertIn(
+            "non-public",
+            research.fetch_page("http://169.254.169.254/latest/meta-data"),
+        )
+        getaddrinfo.return_value = [
+            (socket.AF_INET, None, None, None, ("10.0.0.5", 0))
+        ]
+        self.assertIn(
+            "non-public", research.fetch_page("http://intranet.local/x")
+        )
+        self.assertIn(
+            "http(s)", research.fetch_page("file:///etc/passwd")
+        )
+
+    @mock.patch("chat.research.socket.getaddrinfo")
+    @mock.patch("chat.research.urllib.request.urlopen")
+    def test_fetch_page_extracts_title_and_text(self, urlopen, getaddrinfo):
+        from . import research
+
+        getaddrinfo.return_value = self._public_dns()
+        urlopen.return_value = self._fake_response(
+            b"""<html><head><title>Example Page</title>
+            <style>.x{color:red}</style></head>
+            <body><script>var x = 1;</script>
+            <h1>Hello &amp; welcome</h1><p>First paragraph.</p>
+            <p>Second paragraph.</p></body></html>"""
+        )
+        result = research.fetch_page("https://example.com/page")
+        self.assertIn("Title: Example Page", result)
+        self.assertIn("URL: https://example.com/page", result)
+        self.assertIn("Hello & welcome", result)
+        self.assertIn("First paragraph.", result)
+        self.assertNotIn("var x = 1", result)
+        self.assertNotIn("color:red", result)
+
+    @mock.patch("chat.research.socket.getaddrinfo")
+    @mock.patch("chat.research.urllib.request.urlopen")
+    def test_fetch_page_refuses_binary_content(self, urlopen, getaddrinfo):
+        from . import research
+
+        getaddrinfo.return_value = self._public_dns()
+        urlopen.return_value = self._fake_response(
+            b"\x89PNG...", content_type="image/png"
+        )
+        self.assertIn(
+            "not a readable page",
+            research.fetch_page("https://example.com/pic.png"),
+        )
+
+    @mock.patch("chat.research.socket.getaddrinfo")
+    @mock.patch("chat.research.urllib.request.urlopen")
+    def test_fetch_page_truncates_long_pages(self, urlopen, getaddrinfo):
+        from . import research
+
+        getaddrinfo.return_value = self._public_dns()
+        urlopen.return_value = self._fake_response(
+            ("<html><body><p>" + "word " * 5000 + "</p></body></html>").encode()
+        )
+        result = research.fetch_page("https://example.com/long", max_chars=600)
+        body = result.split("\n\n", 1)[1]
+        self.assertEqual(len(body), 600)
+
+    def test_extract_urls_finds_links_in_order(self):
+        from . import research
+
+        text = "see https://a.example/x and http://b.example/y (done)"
+        self.assertEqual(
+            research.extract_urls(text),
+            ["https://a.example/x", "http://b.example/y"],
+        )
+
+
+class ResearchToolTests(TestCase):
+    def test_schemas_and_dispatch_cover_both_tools(self):
+        from . import tools
+
+        names = [
+            s["function"]["name"] for s in tools.TOOL_SCHEMAS
+        ]
+        self.assertIn("web_search", names)
+        self.assertIn("fetch_page", names)
+        self.assertIn("weather", names)
+        with mock.patch.dict(
+            tools._TOOLS,
+            {"web_search": lambda query, count=5: "1. Hit\n   https://x.example"},
+        ):
+            self.assertIn(
+                "x.example", tools.run_tool("web_search", {"query": "x"})
+            )
+
+    @mock.patch("chat.agent.ai.chat_completion")
+    def test_agent_loop_runs_web_search_and_cites(self, completion):
+        from . import agent, tools
+
+        completion.side_effect = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "web_search",
+                            "arguments": '{"query": "django 5.2"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "Per https://x.example, it is out."},
+        ]
+        with mock.patch.dict(
+            tools._TOOLS,
+            {"web_search": lambda query, count=5: "1. Hit\n   https://x.example"},
+        ):
+            reply, trace = agent.run_agent(
+                [
+                    {"role": "system", "content": "You are KAI."},
+                    {"role": "user", "content": "Is Django 5.2 out?"},
+                ]
+            )
+        self.assertIn("x.example", reply)
+        self.assertEqual(trace[0]["tool"], "web_search")
+        system_sent = completion.call_args_list[0][0][1][0]["content"]
+        self.assertIn("web_search", system_sent)
+        self.assertIn("cite", system_sent.lower())
+
+
+class ReportTests(LoggedInTestCase):
+    def _conversation_with_research(self):
+        conversation = Conversation.objects.create(
+            title="Django research", user=self.user
+        )
+        Message.objects.create(
+            conversation=conversation, role="user", content="Is Django 5.2 out?"
+        )
+        Message.objects.create(
+            conversation=conversation,
+            role="assistant",
+            content="Yes, per the docs.",
+            trace=[
+                {
+                    "tool": "web_search",
+                    "args": {"query": "django 5.2"},
+                    "result": "1. Notes\n   https://example.com/django",
+                },
+                {
+                    "tool": "fetch_page",
+                    "args": {"url": "https://example.com/django"},
+                    "result": "Title: Notes\nURL: https://example.com/django",
+                },
+            ],
+        )
+        return conversation
+
+    def test_build_report_lists_sources_once(self):
+        from . import reports
+
+        conversation = self._conversation_with_research()
+        markdown = reports.build_report(
+            conversation.title, conversation.messages.all()
+        )
+        self.assertIn("# Django research", markdown)
+        self.assertIn("**You:** Is Django 5.2 out?", markdown)
+        self.assertIn("**KAI:** Yes, per the docs.", markdown)
+        self.assertIn("## Sources", markdown)
+        self.assertEqual(
+            markdown.count("https://example.com/django"), 1
+        )
+
+    def test_build_report_without_sources_says_so(self):
+        from . import reports
+
+        conversation = Conversation.objects.create(
+            title="Plain chat", user=self.user
+        )
+        Message.objects.create(
+            conversation=conversation, role="user", content="Hi"
+        )
+        Message.objects.create(
+            conversation=conversation, role="assistant", content="Hello!"
+        )
+        markdown = reports.build_report(
+            conversation.title, conversation.messages.all()
+        )
+        self.assertIn("No sources were recorded", markdown)
+
+    def test_report_endpoint_downloads_markdown(self):
+        conversation = self._conversation_with_research()
+        response = self.client.get(
+            f"/api/conversations/{conversation.pk}/report/"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("attachment", response["Content-Disposition"])
+        self.assertIn("kai-research-", response["Content-Disposition"])
+        text = response.content.decode()
+        self.assertIn("https://example.com/django", text)
+
+    def test_report_endpoint_is_owner_filtered(self):
+        conversation = self._conversation_with_research()
+        stranger = get_user_model().objects.create_user(
+            username="stranger", password="pw"
+        )
+        foreign = Conversation.objects.create(
+            title="Not yours", user=stranger
+        )
+        self.assertEqual(
+            self.client.get(
+                f"/api/conversations/{foreign.pk}/report/"
+            ).status_code,
+            404,
+        )
+        self.client.logout()
+        self.assertEqual(
+            self.client.get(
+                f"/api/conversations/{conversation.pk}/report/"
+            ).status_code,
+            401,
+        )
 
 
 class SetupSecurityTests(TestCase):

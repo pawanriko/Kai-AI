@@ -14,6 +14,8 @@
                                          streamed as NDJSON     (login)
     GET    /api/conversations/         → list conversations   (login)
     GET    /api/conversations/<id>/    → one conversation     (login)
+    GET    /api/conversations/<id>/report/ → Markdown research
+                                         report with sources  (login)
     DELETE /api/conversations/<id>/delete/                    (login)
     GET    /api/memories/              → stored facts         (login)
     POST   /api/memories/add/          → add a fact directly  (login)
@@ -55,7 +57,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
-from . import agent, ai, coding_tools, dedupe, ledger, router
+from . import agent, ai, coding_tools, dedupe, ledger, reports, router
 from .models import Conversation, Memory, Message, SetupGuard, Usage
 from .ratelimit import rate_limit
 
@@ -746,6 +748,25 @@ def conversation_detail(request, pk):
             ],
         }
     )
+
+
+@login_required_json
+def conversation_report(request, pk):
+    """GET /api/conversations/<id>/report/ → the conversation as a
+    Markdown file, with a Sources section built ONLY from the stored
+    agent traces (Phase 5: citations or it didn't happen)."""
+    conversation = _claim(
+        get_object_or_404(_visible_conversations(request), pk=pk),
+        request,
+    )
+    markdown = reports.build_report(
+        conversation.title, conversation.messages.all()
+    )
+    response = HttpResponse(markdown, content_type="text/markdown")
+    response["Content-Disposition"] = (
+        f'attachment; filename="kai-research-{conversation.pk}.md"'
+    )
+    return response
 
 
 @login_required_json

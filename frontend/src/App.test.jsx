@@ -23,6 +23,7 @@ import App from './App'
 
 vi.mock('./api', () => ({
   deleteConversation: vi.fn(),
+  exportReport: vi.fn(),
   getConversation: vi.fn(),
   getMe: vi.fn(),
   listConversations: vi.fn(),
@@ -33,6 +34,8 @@ vi.mock('./api', () => ({
 }))
 
 import {
+  exportReport,
+  getConversation,
   getMe,
   listConversations,
   listModels,
@@ -200,5 +203,56 @@ describe('App stream batching (Phase 2.3 F2)', () => {
     })
     expect(container.textContent).not.toContain('Hello')
     expect(container.querySelector('.send-btn').disabled).toBe(false)
+  })
+})
+
+describe('App research report button (Phase 5)', () => {
+  it('offers a report download once a conversation is open', async () => {
+    listConversations.mockResolvedValue({
+      conversations: [
+        {
+          id: 7,
+          title: 'Django research',
+          created_at: '2026-11-12T00:00:00Z',
+          updated_at: '2026-11-12T00:00:00Z',
+          message_count: 2,
+        },
+      ],
+    })
+    getConversation.mockResolvedValue({
+      id: 7,
+      title: 'Django research',
+      messages: [
+        { id: 1, role: 'user', content: 'Is Django 5.2 out?', trace: [] },
+        { id: 2, role: 'assistant', content: 'Yes.', trace: [] },
+      ],
+    })
+    exportReport.mockResolvedValue(new Blob(['# report']))
+    URL.createObjectURL = vi.fn(() => 'blob:fake')
+    URL.revokeObjectURL = vi.fn()
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(
+      () => {}
+    )
+
+    const container = await renderApp()
+    expect(container.textContent).not.toContain('Download research report')
+
+    await act(async () => {
+      const item = [...container.querySelectorAll('li')].find((li) =>
+        li.textContent.includes('Django research')
+      )
+      item.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {})
+
+    const button = [...container.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Download research report'
+    )
+    expect(button).toBeTruthy()
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(exportReport).toHaveBeenCalledWith(7)
+    vi.restoreAllMocks()
   })
 })

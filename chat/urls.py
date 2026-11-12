@@ -25,6 +25,11 @@ urlpatterns = [
         name="conversation-detail",
     ),
     path(
+        "conversations/<int:pk>/report/",
+        views.conversation_report,
+        name="conversation-report",
+    ),
+    path(
         "conversations/<int:pk>/delete/",
         views.conversation_delete,
         name="conversation-delete",

@@ -18,6 +18,8 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
+from . import research
+
 # ---------------------------------------------------------------- schemas
 
 TOOL_SCHEMAS = [
@@ -70,6 +72,53 @@ TOOL_SCHEMAS = [
                     }
                 },
                 "required": ["city"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web for current information (news, docs, "
+                "prices, facts newer than training). Returns numbered "
+                "results with URLs — open the promising ones with "
+                "fetch_page, and cite the URLs you actually used."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query, e.g. 'Django 5.2 release notes'",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "How many results (1-10, default 5)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_page",
+            "description": (
+                "Read a web page as text. Use on URLs returned by "
+                "web_search to get the full content before answering. "
+                "Only public http(s) pages can be fetched."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The page URL to read",
+                    }
+                },
+                "required": ["url"],
             },
         },
     },
@@ -214,6 +263,8 @@ _TOOLS = {
     "calculator": calculator,
     "current_datetime": current_datetime,
     "weather": weather,
+    "web_search": research.web_search,
+    "fetch_page": research.fetch_page,
 }
 
 

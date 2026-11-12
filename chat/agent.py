@@ -22,9 +22,11 @@ from . import ai, coding_tools, tools
 MAX_STEPS = 6
 CODING_MAX_STEPS = 14
 AGENT_NOTE = (
-    " You have tools available (calculator, current_datetime, weather). "
-    "Use them whenever a question needs exact maths, the current "
-    "date/time, or live weather — never guess those."
+    " You have tools available (calculator, current_datetime, weather, "
+    "web_search, fetch_page). Use them whenever a question needs exact "
+    "maths, the current date/time, live weather, or current information "
+    "from the web — never guess those. When you answer from the web, "
+    "cite the URLs you actually opened."
 )
 CODING_NOTE = (
     " You are in CODING MODE. You also have coding tools that work "

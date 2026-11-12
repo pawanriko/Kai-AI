@@ -213,19 +213,27 @@ export function mergeMemories(keepId, dropIds) {
   })
 }
 
-// Export is a file download, not JSON: fetch it directly and hand
-// the caller a Blob. Errors still surface as thrown Errors with a
-// status, like request().
-export async function exportMemories(format, project) {
-  const query = new URLSearchParams({ format })
-  if (project) query.set('project', project)
-  const response = await fetch(`/api/memories/export/?${query}`)
+// File downloads (memory export, research reports) are blobs, not
+// JSON: fetch directly and hand the caller a Blob. Errors still
+// surface as thrown Errors with a status, like request().
+async function fetchBlob(path) {
+  const response = await fetch(path)
   if (!response.ok) {
     const error = new Error(`Request failed (${response.status})`)
     error.status = response.status
     throw error
   }
   return response.blob()
+}
+
+export async function exportMemories(format, project) {
+  const query = new URLSearchParams({ format })
+  if (project) query.set('project', project)
+  return fetchBlob(`/api/memories/export/?${query}`)
+}
+
+export function exportReport(conversationId) {
+  return fetchBlob(`/api/conversations/${conversationId}/report/`)
 }
 
 export function confirmMemory(id) {
