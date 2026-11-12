@@ -78,6 +78,8 @@ body {
   letter-spacing: 0.18em;
   text-transform: uppercase;
   cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease,
+    border-color 120ms ease;
 }
 
 .nav-btn.active {
@@ -96,6 +98,7 @@ body {
   letter-spacing: 0.06em;
   cursor: pointer;
   margin-bottom: 1.25rem;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .new-chat:hover {
@@ -124,6 +127,8 @@ body {
   border: 1px solid transparent;
   cursor: pointer;
   color: var(--muted);
+  transition: border-color 120ms ease, color 120ms ease,
+    background-color 120ms ease;
 }
 
 .history-item:hover {
@@ -284,6 +289,7 @@ body {
   resize: none;
   padding: 0.5rem 0.2rem;
   outline: none;
+  transition: border-bottom-color 120ms ease;
 }
 
 .composer-input:focus {
@@ -297,6 +303,7 @@ body {
   padding: 0.55rem 1.4rem;
   font-weight: 700;
   cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .send-btn:hover:not(:disabled) {
@@ -319,6 +326,8 @@ body {
   text-transform: uppercase;
   cursor: pointer;
   white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease,
+    border-color 120ms ease;
 }
 
 .agent-toggle.active {
@@ -398,6 +407,12 @@ body {
   border: 1px solid var(--line);
   background: var(--panel);
   padding: 0.75rem 1rem;
+  flex-wrap: wrap;
+  transition: border-color 120ms ease;
+}
+
+.memory-item:hover {
+  border-color: var(--muted);
 }
 
 .forget-btn {
@@ -409,6 +424,7 @@ body {
   font-size: 0.78rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  transition: color 120ms ease, border-color 120ms ease;
 }
 
 .forget-btn:hover {
@@ -483,4 +499,298 @@ body {
   font-size: 0.85em;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* ---------- Final polish: motion, Phase 5–7 controls, responsive ----------
+   CSS-only: no layout redesign, no behavior change. Motion is
+   subtle and consistent (one entry, one pulse, 120ms transitions),
+   and every animation/transition is disabled under
+   prefers-reduced-motion. The visual verdict is Pawan's, live. */
+
+@keyframes kai-bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes kai-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes kai-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+/* Message entry: each bubble row fades/rises once on mount. The
+   growing stream bubble keeps its element identity across chunks
+   (stable key), so the animation never restarts mid-stream. */
+.bubble-row {
+  animation: kai-bubble-in 180ms ease-out;
+}
+
+/* Thinking: a gentle pulse instead of a static dim. */
+.bubble.thinking {
+  animation: kai-pulse 1.4s ease-in-out infinite;
+}
+
+/* Panel views fade in on switch (Memory, Usage, Automation share
+   .memory-panel). */
+.memory-panel {
+  animation: kai-fade-in 160ms ease-out;
+}
+
+/* Keyboard focus stays visible everywhere. */
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 1px solid var(--text);
+  outline-offset: 2px;
+}
+
+/* Subtle press feedback on the themed buttons. */
+.nav-btn:active,
+.new-chat:active,
+.send-btn:active:not(:disabled),
+.agent-toggle:active,
+.forget-btn:active,
+.mic-btn:active,
+.speak-btn:active,
+.history-del:active {
+  transform: translateY(1px);
+}
+
+/* Phase 6: bundle picker matches the model picker. */
+.bundle-picker,
+.voice-lang-picker {
+  background: var(--select-bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 0 0.5rem;
+  font-size: 0.85rem;
+}
+
+.bundle-picker option,
+.voice-lang-picker option {
+  background-color: var(--select-bg);
+  color: var(--text);
+}
+
+/* Phase 7: mic + read-aloud buttons match the toggle/button
+   language. The listening state inverts and pulses gently. */
+.mic-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 0 0.8rem;
+  font-size: 0.78rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease,
+    border-color 120ms ease;
+}
+
+.mic-btn.listening {
+  color: var(--bg);
+  background: var(--text);
+  border-color: var(--text);
+  font-weight: 700;
+  animation: kai-pulse 1.4s ease-in-out infinite;
+}
+
+.speak-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 0.25rem 0.7rem;
+  margin-top: 0.5rem;
+  cursor: pointer;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.speak-btn:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+.voice-hint {
+  align-self: center;
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+/* Phase 6: plan review card. */
+.plan-review {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 1rem 1.25rem;
+  margin: 1rem 1.5rem 0;
+  animation: kai-fade-in 160ms ease-out;
+}
+
+.plan-review h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.plan-review ol {
+  line-height: 1.7;
+  margin: 0.5rem 0 1rem;
+  padding-left: 1.4rem;
+}
+
+.plan-review button {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 0.4rem 1rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.plan-review button:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+/* Phase 5: research report download row. */
+.report-row {
+  padding: 1rem 1.5rem 0;
+}
+
+.report-row button {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 0.4rem 1rem;
+  cursor: pointer;
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.report-row button:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+/* Panel forms (Memory / Automation): bare browser controls looked
+   alien against the dark theme — theme them to match. */
+.memory-panel form {
+  margin-bottom: 1.5rem;
+}
+
+.memory-panel h3 {
+  font-size: 0.8rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.memory-panel input,
+.memory-panel select,
+.memory-panel textarea {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  font-size: 0.9rem;
+  transition: border-color 120ms ease;
+}
+
+.memory-panel input:focus,
+.memory-panel select:focus,
+.memory-panel textarea:focus {
+  border-color: var(--text);
+  outline: none;
+}
+
+.memory-panel button:not(.forget-btn) {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 0.45rem 1rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.memory-panel button:not(.forget-btn):hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+/* Narrow screens: the composer now holds many controls — let it
+   wrap instead of overflowing, with the text box on its own row. */
+@media (max-width: 720px) {
+  .composer {
+    flex-wrap: wrap;
+    padding: 0.75rem 1rem;
+  }
+  .composer-input {
+    flex-basis: 100%;
+  }
+  .messages {
+    padding: 1rem;
+  }
+  .memory-panel {
+    padding: 1.25rem;
+  }
+  .model-picker {
+    max-width: 130px;
+  }
+  .side-nav {
+    flex-wrap: wrap;
+  }
+  .nav-btn {
+    flex: 1 1 45%;
+  }
+  .plan-review {
+    margin: 1rem 1rem 0;
+  }
+  .report-row {
+    padding: 1rem 1rem 0;
+  }
+}
+
+/* Reduced motion: no animation, no transition — content appears
+   in its final state immediately. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
