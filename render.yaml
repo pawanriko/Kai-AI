@@ -24,7 +24,14 @@ services:
     env: python
     plan: free
     buildCommand: "pip install -r requirements.txt -r requirements-prod.txt && npm --prefix frontend ci && npm --prefix frontend run build && python manage.py collectstatic --noinput && python manage.py migrate"
-    startCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --timeout 120"
+    # Phase 2.4 (F6): 2 workers instead of the gunicorn default of 1,
+    # so one slow provider call cannot stall every other request.
+    # Kept at 2: the free tier has limited RAM, and the rate-limit
+    # counters are per-process locmem (see SECURITY_AUDIT S4), so
+    # each worker enforces its own window — acceptable for a
+    # single-owner instance; revisit if a shared cache is added.
+    # Deploy-time verification deferred (no deploy in this chain).
+    startCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --timeout 120 --workers 2"
     envVars:
       - key: DEBUG
         value: "False"

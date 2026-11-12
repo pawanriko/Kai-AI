@@ -392,20 +392,15 @@ def _chat_context(request):
     return None, body, user_text, conversation, messages
 
 
-def _persist_exchange(
+def _save_exchange(
     request, conversation, user_text, reply, trace,
     status=Message.Status.COMPLETE,
 ):
-    """Save one exchange and (for completed replies) harvest memories.
-
-    Shared by the plain and streaming chat endpoints so both persist
-    identically. Returns the conversation (created here when None).
-    `status` is Message.Status.INCOMPLETE only when the streaming
-    endpoint saves a partial reply after a mid-stream provider
-    failure (Phase 2.1) — the text is kept, explicitly flagged, and
-    no facts are harvested from it: partial text is not a trustworthy
-    source about the user.
-    """
+    """Save one exchange's messages. Returns the conversation
+    (created here when None). No memory harvesting happens here —
+    the caller decides when (or whether) facts are extracted, so
+    the streaming endpoint can yield 'done' before the extraction
+    call runs (Phase 2.4, finding F4)."""
     if conversation is None:
         conversation = Conversation.objects.create(
             title=user_text[:60] or "New conversation",
@@ -422,26 +417,53 @@ def _persist_exchange(
         status=status,
     )
     conversation.save(update_fields=["updated_at"])
+    return conversation
 
-    # Best-effort memory: new facts land as SUGGESTIONS (Step 6) —
-    # they reach future system prompts only after the user confirms
-    # them in the Memory panel.
+
+def _harvest_memories(request, user_text, reply):
+    """Best-effort memory: new facts land as SUGGESTIONS (Step 6) —
+    they reach future system prompts only after the user confirms
+    them in the Memory panel. A second AI call, so the streaming
+    endpoint runs it only AFTER yielding 'done' (Phase 2.4, F4)."""
     visible = _visible_memories(request)
-    if status == Message.Status.COMPLETE and visible.count() < MAX_MEMORIES_PER_USER:
-        known = {m.fact.lower() for m in visible}
-        for fact in ai.extract_facts(user_text, reply):
-            fact = fact.strip()[:MAX_FACT_CHARS]
-            lowered = fact.lower()
-            if not fact or lowered in known:
-                continue
-            if any(marker in lowered for marker in _INSTRUCTION_MARKERS):
-                continue
-            Memory.objects.create(
-                fact=fact,
-                user=request.user,
-                status=Memory.Status.SUGGESTED,
-            )
-            known.add(lowered)
+    if visible.count() >= MAX_MEMORIES_PER_USER:
+        return
+    known = {m.fact.lower() for m in visible}
+    for fact in ai.extract_facts(user_text, reply):
+        fact = fact.strip()[:MAX_FACT_CHARS]
+        lowered = fact.lower()
+        if not fact or lowered in known:
+            continue
+        if any(marker in lowered for marker in _INSTRUCTION_MARKERS):
+            continue
+        Memory.objects.create(
+            fact=fact,
+            user=request.user,
+            status=Memory.Status.SUGGESTED,
+        )
+        known.add(lowered)
+
+
+def _persist_exchange(
+    request, conversation, user_text, reply, trace,
+    status=Message.Status.COMPLETE,
+):
+    """Save one exchange and (for completed replies) harvest memories.
+
+    Used by the atomic /api/chat/ endpoint and by the streaming
+    endpoint's interruption path. The streaming success path instead
+    calls _save_exchange, yields 'done', and only then harvests —
+    see chat_stream. `status` is Message.Status.INCOMPLETE only when
+    the streaming endpoint saves a partial reply after a mid-stream
+    provider failure (Phase 2.1) — the text is kept, explicitly
+    flagged, and no facts are harvested from it: partial text is not
+    a trustworthy source about the user.
+    """
+    conversation = _save_exchange(
+        request, conversation, user_text, reply, trace, status=status
+    )
+    if status == Message.Status.COMPLETE:
+        _harvest_memories(request, user_text, reply)
     return conversation
 
 
@@ -475,6 +497,63 @@ def chat(request):
     )
 
 
+def _stream_events(request, body, user_text, conversation, messages):
+    """The NDJSON event generator behind /api/chat/stream/.
+
+    Kept as a module-level generator (not a closure) so tests can
+    iterate it manually and assert event ORDERING — in particular
+    that 'done' is yielded before memory extraction runs (Phase
+    2.4, F4). The view only wraps it in a StreamingHttpResponse.
+    """
+    parts = []
+    try:
+        for chunk in ai.ask_ai_stream(
+            messages, model=body.get("model") or None
+        ):
+            parts.append(chunk)
+            yield json.dumps({"type": "chunk", "text": chunk}) + "\n"
+    except ai.StreamInterrupted:
+        # Provider died mid-reply: persist the partial text
+        # flagged INCOMPLETE and report the interruption. The
+        # client keeps the partial bubble, labelled — it is
+        # never presented as a completed answer.
+        saved = _persist_exchange(
+            request,
+            conversation,
+            user_text,
+            "".join(parts),
+            [],
+            status=Message.Status.INCOMPLETE,
+        )
+        yield json.dumps(
+            {
+                "type": "error",
+                "error": "AI response interrupted",
+                "interrupted": True,
+                "conversation_id": saved.pk,
+            }
+        ) + "\n"
+        return
+    reply = "".join(parts)
+    if not reply:
+        yield json.dumps(
+            {"type": "error", "error": "AI unavailable"}
+        ) + "\n"
+        return
+    saved = _save_exchange(request, conversation, user_text, reply, [])
+    yield json.dumps(
+        {"type": "done", "conversation_id": saved.pk, "trace": []}
+    ) + "\n"
+    # Phase 2.4 (F4): 'done' is already on its way to the client
+    # before this line runs — memory extraction is a second AI
+    # call that used to delay 'done' by seconds. It still runs
+    # before the response closes, so facts are never lost as
+    # long as the client reads to the end of the stream (the
+    # SPA does). The 2.1 interruption path above is unchanged:
+    # it persists INCOMPLETE and never harvests.
+    _harvest_memories(request, user_text, reply)
+
+
 @login_required_json
 @rate_limit("chat", 30, 60)
 def chat_stream(request):
@@ -506,45 +585,9 @@ def chat_stream(request):
         )
 
     def events():
-        parts = []
-        try:
-            for chunk in ai.ask_ai_stream(
-                messages, model=body.get("model") or None
-            ):
-                parts.append(chunk)
-                yield json.dumps({"type": "chunk", "text": chunk}) + "\n"
-        except ai.StreamInterrupted:
-            # Provider died mid-reply: persist the partial text
-            # flagged INCOMPLETE and report the interruption. The
-            # client keeps the partial bubble, labelled — it is
-            # never presented as a completed answer.
-            saved = _persist_exchange(
-                request,
-                conversation,
-                user_text,
-                "".join(parts),
-                [],
-                status=Message.Status.INCOMPLETE,
-            )
-            yield json.dumps(
-                {
-                    "type": "error",
-                    "error": "AI response interrupted",
-                    "interrupted": True,
-                    "conversation_id": saved.pk,
-                }
-            ) + "\n"
-            return
-        reply = "".join(parts)
-        if not reply:
-            yield json.dumps(
-                {"type": "error", "error": "AI unavailable"}
-            ) + "\n"
-            return
-        saved = _persist_exchange(request, conversation, user_text, reply, [])
-        yield json.dumps(
-            {"type": "done", "conversation_id": saved.pk, "trace": []}
-        ) + "\n"
+        yield from _stream_events(
+            request, body, user_text, conversation, messages
+        )
 
     response = StreamingHttpResponse(events(), content_type="application/x-ndjson")
     response["X-Accel-Buffering"] = "no"

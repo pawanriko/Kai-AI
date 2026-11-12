@@ -6,7 +6,7 @@ from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.test import Client, TestCase, TransactionTestCase
+from django.test import Client, RequestFactory, TestCase, TransactionTestCase
 
 from .models import Conversation, Memory, Message
 
@@ -992,6 +992,58 @@ class StreamingChatTests(LoggedInTestCase):
         self.assertEqual(events[-1]["type"], "done")
         assistant = Message.objects.get(role=Message.Role.ASSISTANT)
         self.assertEqual(assistant.status, Message.Status.COMPLETE)
+
+    def test_done_is_yielded_before_memory_extraction(self):
+        """Phase 2.4 (F4): the 'done' event must be yielded BEFORE
+        the memory-extraction AI call runs — extraction used to
+        delay 'done' by seconds. Iterate the stream generator
+        manually: the moment 'done' has been yielded,
+        extract_facts must not have been called yet; after the
+        generator is exhausted, the fact must still have landed."""
+        from .views import _stream_events
+
+        request = RequestFactory().post("/api/chat/stream/")
+        request.user = self.user
+        extract = mock.Mock(return_value=["User likes tea"])
+        with mock.patch(
+            "chat.views.ai.ask_ai_stream", return_value=iter(["Hello "])
+        ), mock.patch("chat.views.ai.extract_facts", extract):
+            gen = _stream_events(
+                request, {}, "say hi", None, [{"role": "user", "content": "say hi"}]
+            )
+            first = json.loads(next(gen))
+            self.assertEqual(first["type"], "chunk")
+            done = json.loads(next(gen))
+            self.assertEqual(done["type"], "done")
+            extract.assert_not_called()
+            list(gen)  # exhaust: the harvest runs after 'done'
+        extract.assert_called_once_with("say hi", "Hello ")
+        self.assertEqual(Memory.objects.count(), 1)
+        self.assertEqual(Memory.objects.get().fact, "User likes tea")
+        self.assertEqual(
+            Memory.objects.get().status, Memory.Status.SUGGESTED
+        )
+
+    def test_streamed_exchange_harvests_memories_on_full_consumption(self):
+        """The HTTP layer: consuming the whole stream still lands
+        the harvested fact — the Phase 2.4 reorder must not lose
+        memories when the client reads to the end (as the SPA
+        does)."""
+        with mock.patch(
+            "chat.views.ai.ask_ai_stream", return_value=iter(["Hi"])
+        ), mock.patch(
+            "chat.views.ai.extract_facts",
+            return_value=["User likes tea"],
+        ):
+            response = self.client.post(
+                "/api/chat/stream/",
+                data=json.dumps({"message": "say hi"}),
+                content_type="application/json",
+            )
+            events = self._stream_body(response)
+        self.assertEqual(events[-1]["type"], "done")
+        self.assertEqual(Memory.objects.count(), 1)
+        self.assertEqual(Memory.objects.get().fact, "User likes tea")
 
     def test_interrupted_exchange_harvests_no_memories(self):
         with mock.patch(
