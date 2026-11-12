@@ -152,3 +152,13 @@ describe('ChatInput double-submit guard', () => {
     expect(onSend).not.toHaveBeenCalled()
   })
 })
+
+describe('ChatInput Auto option (Phase 3)', () => {
+  it('offers an Auto router choice first in the picker', () => {
+    const { container } = renderInput({ onSend: vi.fn() })
+    const options = [...container.querySelectorAll('.model-picker option')]
+    expect(options[0].value).toBe('auto')
+    expect(options[0].textContent).toContain('Auto')
+    expect(options[0].disabled).toBe(false)
+  })
+})

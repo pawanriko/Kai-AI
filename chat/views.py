@@ -8,6 +8,7 @@
     POST   /api/auth/login/            → start a Django session
     POST   /api/auth/logout/           → end it
     GET    /api/models/                → provider catalogue   (login)
+    GET    /api/usage/                 → cost-ledger readout  (login)
     POST   /api/chat/                  → send a message       (login)
     POST   /api/chat/stream/           → send a message, reply
                                          streamed as NDJSON     (login)
@@ -49,8 +50,8 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
-from . import agent, ai, coding_tools
-from .models import Conversation, Memory, Message, SetupGuard
+from . import agent, ai, coding_tools, ledger, router
+from .models import Conversation, Memory, Message, SetupGuard, Usage
 from .ratelimit import rate_limit
 
 SYSTEM_PROMPT = (
@@ -293,6 +294,54 @@ def model_catalog(request):
     return JsonResponse({"providers": ai.catalog()})
 
 
+@login_required_json
+def usage_list(request):
+    """GET /api/usage/ → cost-ledger readout (Phase 3): totals plus
+    the 20 most recent calls. Token totals count only rows whose
+    provider reported counts; `unknown_cost_calls` counts rows with
+    no verified price (their cost is unknown, not zero). Only the
+    signed-in user's rows are ever visible."""
+    from django.db.models import Count, Q, Sum
+
+    rows = Usage.objects.filter(user=request.user)
+    totals = rows.aggregate(
+        calls=Count("id"),
+        total_prompt=Sum("prompt_tokens"),
+        total_completion=Sum("completion_tokens"),
+        total_cost=Sum("estimated_cost_usd"),
+        unknown_cost_calls=Count("id", filter=Q(estimated_cost_usd__isnull=True)),
+        unknown_token_calls=Count(
+            "id", filter=Q(prompt_tokens__isnull=True)
+        ),
+    )
+    return JsonResponse(
+        {
+            "totals": {
+                "calls": totals["calls"],
+                "prompt_tokens": totals["total_prompt"] or 0,
+                "completion_tokens": totals["total_completion"] or 0,
+                "estimated_cost_usd": totals["total_cost"],
+                "unknown_cost_calls": totals["unknown_cost_calls"],
+                "unknown_token_calls": totals["unknown_token_calls"],
+            },
+            "recent": [
+                {
+                    "id": u.pk,
+                    "provider": u.provider,
+                    "model": u.model,
+                    "task": u.task,
+                    "kind": u.kind,
+                    "prompt_tokens": u.prompt_tokens,
+                    "completion_tokens": u.completion_tokens,
+                    "estimated_cost_usd": u.estimated_cost_usd,
+                    "created_at": u.created_at.isoformat(),
+                }
+                for u in rows[:20]
+            ],
+        }
+    )
+
+
 def _system_prompt(request):
     facts = [
         m.fact
@@ -420,16 +469,17 @@ def _save_exchange(
     return conversation
 
 
-def _harvest_memories(request, user_text, reply):
+def _harvest_memories(request, user_text, reply, on_usage=None):
     """Best-effort memory: new facts land as SUGGESTIONS (Step 6) —
     they reach future system prompts only after the user confirms
     them in the Memory panel. A second AI call, so the streaming
-    endpoint runs it only AFTER yielding 'done' (Phase 2.4, F4)."""
+    endpoint runs it only AFTER yielding 'done' (Phase 2.4, F4).
+    `on_usage` is forwarded to extract_facts for the cost ledger."""
     visible = _visible_memories(request)
     if visible.count() >= MAX_MEMORIES_PER_USER:
         return
     known = {m.fact.lower() for m in visible}
-    for fact in ai.extract_facts(user_text, reply):
+    for fact in ai.extract_facts(user_text, reply, on_usage=on_usage):
         fact = fact.strip()[:MAX_FACT_CHARS]
         lowered = fact.lower()
         if not fact or lowered in known:
@@ -447,6 +497,7 @@ def _harvest_memories(request, user_text, reply):
 def _persist_exchange(
     request, conversation, user_text, reply, trace,
     status=Message.Status.COMPLETE,
+    on_usage=None,
 ):
     """Save one exchange and (for completed replies) harvest memories.
 
@@ -463,8 +514,21 @@ def _persist_exchange(
         request, conversation, user_text, reply, trace, status=status
     )
     if status == Message.Status.COMPLETE:
-        _harvest_memories(request, user_text, reply)
+        _harvest_memories(request, user_text, reply, on_usage=on_usage)
     return conversation
+
+
+def _usage_callback(request, task, kind):
+    """A cost-ledger callback for one exchange: the AI layer calls
+    it with (provider, model, usage) per provider call, and it
+    records one Usage row owned by the signed-in user. The task
+    classification is computed once per exchange (it describes the
+    user's message, not the individual call)."""
+
+    def record(provider, model, usage):
+        ledger.record_usage(request.user, provider, model, task, kind, usage)
+
+    return record
 
 
 @login_required_json
@@ -477,38 +541,59 @@ def chat(request):
     if error is not None:
         return error
 
+    task = router.classify_task(user_text)
     trace = []
     if body.get("coding"):
         reply, trace = agent.run_agent(
-            messages, body.get("model") or None, coding=True
+            messages,
+            body.get("model") or None,
+            coding=True,
+            on_usage=_usage_callback(request, task, Usage.Kind.AGENT),
         )
     elif body.get("agent"):
-        reply, trace = agent.run_agent(messages, body.get("model") or None)
+        reply, trace = agent.run_agent(
+            messages,
+            body.get("model") or None,
+            on_usage=_usage_callback(request, task, Usage.Kind.AGENT),
+        )
     else:
-        reply = ai.ask_ai(messages, model=body.get("model") or None)
+        reply = ai.ask_ai(
+            messages,
+            model=body.get("model") or None,
+            on_usage=_usage_callback(request, task, Usage.Kind.CHAT),
+        )
     if reply is None:
         return JsonResponse({"error": "AI unavailable"}, status=502)
 
     conversation = _persist_exchange(
-        request, conversation, user_text, reply, trace
+        request,
+        conversation,
+        user_text,
+        reply,
+        trace,
+        on_usage=_usage_callback(request, task, Usage.Kind.EXTRACT),
     )
     return JsonResponse(
         {"reply": reply, "conversation_id": conversation.pk, "trace": trace}
     )
 
 
-def _stream_events(request, body, user_text, conversation, messages):
+def _stream_events(request, body, user_text, conversation, messages,
+                   on_usage=None, extract_usage=None):
     """The NDJSON event generator behind /api/chat/stream/.
 
     Kept as a module-level generator (not a closure) so tests can
     iterate it manually and assert event ORDERING — in particular
     that 'done' is yielded before memory extraction runs (Phase
     2.4, F4). The view only wraps it in a StreamingHttpResponse.
+    `on_usage` records the streamed call in the cost ledger;
+    `extract_usage` records the memory-extraction call (a separate
+    row, kind EXTRACT).
     """
     parts = []
     try:
         for chunk in ai.ask_ai_stream(
-            messages, model=body.get("model") or None
+            messages, model=body.get("model") or None, on_usage=on_usage
         ):
             parts.append(chunk)
             yield json.dumps({"type": "chunk", "text": chunk}) + "\n"
@@ -551,7 +636,9 @@ def _stream_events(request, body, user_text, conversation, messages):
     # long as the client reads to the end of the stream (the
     # SPA does). The 2.1 interruption path above is unchanged:
     # it persists INCOMPLETE and never harvests.
-    _harvest_memories(request, user_text, reply)
+    _harvest_memories(
+        request, user_text, reply, on_usage=extract_usage
+    )
 
 
 @login_required_json
@@ -585,8 +672,17 @@ def chat_stream(request):
         )
 
     def events():
+        task = router.classify_task(user_text)
         yield from _stream_events(
-            request, body, user_text, conversation, messages
+            request,
+            body,
+            user_text,
+            conversation,
+            messages,
+            on_usage=_usage_callback(request, task, Usage.Kind.STREAM),
+            extract_usage=_usage_callback(
+                request, task, Usage.Kind.EXTRACT
+            ),
         )
 
     response = StreamingHttpResponse(events(), content_type="application/x-ndjson")

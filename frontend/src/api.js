@@ -77,6 +77,10 @@ export function listModels() {
   return request('/api/models/')
 }
 
+export function listUsage() {
+  return request('/api/usage/')
+}
+
 export function sendChat(
   message,
   conversationId,

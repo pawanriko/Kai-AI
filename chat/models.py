@@ -116,3 +116,43 @@ class Memory(models.Model):
 
     def __str__(self):
         return self.fact[:60]
+
+
+class Usage(models.Model):
+    """Cost ledger (Phase 3): one row per provider call.
+
+    Token counts and cost are NULL when the provider did not report
+    them — a streamed call, or a model with no verified price — so
+    NULL always means "unknown", never zero. A zero cost is recorded
+    only for ids the router proves free (OpenRouter `:free`).
+    `task` is the router's classification of the exchange; `kind`
+    says which path made the call. Rows are created only by
+    authenticated requests, so the owner FK is never NULL (unlike
+    the pre-auth Conversation/Memory rows).
+    """
+
+    class Kind(models.TextChoices):
+        CHAT = "chat", "Chat"
+        STREAM = "stream", "Stream"
+        AGENT = "agent", "Agent"
+        EXTRACT = "extract", "Memory extraction"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="usage",
+    )
+    provider = models.CharField(max_length=32)
+    model = models.CharField(max_length=128)
+    task = models.CharField(max_length=16, null=True, blank=True)
+    kind = models.CharField(max_length=16, choices=Kind.choices)
+    prompt_tokens = models.IntegerField(null=True, blank=True)
+    completion_tokens = models.IntegerField(null=True, blank=True)
+    estimated_cost_usd = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.provider}::{self.model} ({self.kind})"

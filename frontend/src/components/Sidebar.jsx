@@ -30,6 +30,12 @@ export default function Sidebar({
         >
           Memory
         </button>
+        <button
+          className={view === 'usage' ? 'nav-btn active' : 'nav-btn'}
+          onClick={() => onView('usage')}
+        >
+          Usage
+        </button>
       </nav>
 
       <button className="new-chat" onClick={onNew}>

@@ -47,6 +47,10 @@ export default function ChatInput({
         onChange={(e) => onModel(e.target.value)}
         title="Provider and model"
       >
+        {/* Phase 3: Auto lets the task router pick a free model per
+            message (coding/research/reasoning/chat). It never picks
+            a paid model — those stay explicit picks only. */}
+        <option value="auto">Auto (router — free models)</option>
         {providers.map((p) => (
           <optgroup key={p.provider} label={p.label}>
             {p.models.map((m) => (

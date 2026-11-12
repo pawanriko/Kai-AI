@@ -15,6 +15,7 @@ import Login from './components/Login'
 import MemoryPanel from './components/MemoryPanel'
 import MessageList from './components/MessageList'
 import Sidebar from './components/Sidebar'
+import UsagePanel from './components/UsagePanel'
 
 // App is the conductor: it owns the shared state (which conversation
 // is open, its messages, the chosen model) and passes data + callbacks
@@ -316,6 +317,8 @@ export default function App() {
       <main className="main">
         {view === 'memory' ? (
           <MemoryPanel />
+        ) : view === 'usage' ? (
+          <UsagePanel />
         ) : (
           <>
             {error && <div className="error-box">{error}</div>}

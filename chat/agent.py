@@ -45,10 +45,14 @@ def _dispatch(name, args):
     return tools.run_tool(name, args)
 
 
-def run_agent(messages, choice=None, coding=False):
+def run_agent(messages, choice=None, coding=False, on_usage=None):
     """Run the loop. `messages` is the chat history incl. a system
     message. Returns (reply_text, trace) — reply_text is None only
-    when the provider never answered at all."""
+    when the provider never answered at all. The literal choice
+    "auto" resolves through the task router (route_task) on the
+    latest user message; any other choice goes through
+    agent_provider. `on_usage` is forwarded to every
+    chat_completion call for the cost ledger (one row per call)."""
     if coding and not coding_tools.execution_enabled():
         # Defense in depth (Phase 1 Step 0): the API view rejects
         # coding requests first, but no caller of the agent may ever
@@ -57,7 +61,10 @@ def run_agent(messages, choice=None, coding=False):
             "Coding mode is disabled on this server.",
             [],
         )
-    provider, model = ai.agent_provider(choice)
+    if choice == "auto":
+        provider, model = ai.route_task(messages)
+    else:
+        provider, model = ai.agent_provider(choice)
     schemas = list(tools.TOOL_SCHEMAS)
     max_steps = MAX_STEPS
     note = AGENT_NOTE
@@ -77,6 +84,7 @@ def run_agent(messages, choice=None, coding=False):
             working,
             model,
             tools=None if last_round else schemas,
+            on_usage=on_usage,
         )
         if message is None:
             return None, trace
@@ -109,7 +117,9 @@ def run_agent(messages, choice=None, coding=False):
     # Step budget exhausted (or a provider returned tool calls even
     # with tools off): one final no-tools attempt so the user still
     # gets an answer built from everything the tools returned.
-    message = ai.chat_completion(provider, working, model, tools=None)
+    message = ai.chat_completion(
+        provider, working, model, tools=None, on_usage=on_usage
+    )
     if message is not None and not (message.get("tool_calls") or []):
         return message.get("content") or "", trace
     return (

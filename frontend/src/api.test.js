@@ -12,6 +12,7 @@ import {
   confirmMemory,
   getMe,
   listConversations,
+  listUsage,
   login,
   logout,
   rejectMemory,
@@ -254,5 +255,16 @@ describe('api.js auth + CSRF', () => {
     const [url, options] = fetchMock.mock.calls[0]
     expect(url).toBe('/api/memories/7/reject/')
     expect(options.method).toBe('POST')
+  })
+
+  it('fetches the usage ledger with a plain GET', async () => {
+    const fetchMock = mockFetch(
+      jsonResponse(200, { totals: { calls: 0 }, recent: [] })
+    )
+    const data = await listUsage()
+    expect(data.totals.calls).toBe(0)
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/usage/')
+    expect(options.headers['X-CSRFToken']).toBeUndefined()
   })
 })

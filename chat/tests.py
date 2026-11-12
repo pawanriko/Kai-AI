@@ -686,7 +686,7 @@ class MemoryWorkflowTests(LoggedInTestCase):
     """Step 6: facts are suggestions until confirmed."""
 
     def _chat_and_capture_system(self, captured):
-        def fake_ask(messages, model=None):
+        def fake_ask(messages, model=None, on_usage=None):
             captured.append(messages[0]["content"])
             return "ok"
 
@@ -1017,7 +1017,7 @@ class StreamingChatTests(LoggedInTestCase):
             self.assertEqual(done["type"], "done")
             extract.assert_not_called()
             list(gen)  # exhaust: the harvest runs after 'done'
-        extract.assert_called_once_with("say hi", "Hello ")
+        extract.assert_called_once_with("say hi", "Hello ", on_usage=None)
         self.assertEqual(Memory.objects.count(), 1)
         self.assertEqual(Memory.objects.get().fact, "User likes tea")
         self.assertEqual(
@@ -1082,7 +1082,7 @@ class StreamingChatTests(LoggedInTestCase):
         )
         captured = {}
 
-        def fake_ask(messages, model=None):
+        def fake_ask(messages, model=None, on_usage=None):
             captured["messages"] = messages
             return "ok"
 
@@ -1115,7 +1115,7 @@ class AiStreamFailureTests(TestCase):
 
         calls = []
 
-        def fake_stream(provider, messages, model):
+        def fake_stream(provider, messages, model, usage_out=None):
             calls.append(provider)
             return streams_by_provider[provider]()
 
@@ -1160,7 +1160,7 @@ class AiStreamFailureTests(TestCase):
 
         calls = []
 
-        def fake_stream(provider, messages, model):
+        def fake_stream(provider, messages, model, usage_out=None):
             calls.append((provider, model))
             return streams_by_model[(provider, model)]()
 
@@ -1288,3 +1288,566 @@ class AiStreamFailureTests(TestCase):
         )
         self.assertIsNone(error)
         self.assertEqual(chunks, [])
+
+
+class RouterTests(TestCase):
+    """Phase 3: deterministic task classification + the free-only
+    routing rule. No network, no AI calls — pure functions."""
+
+    def test_classify_task(self):
+        from .router import classify_task
+
+        self.assertEqual(classify_task("fix this python function"), "coding")
+        self.assertEqual(classify_task("debug the traceback"), "coding")
+        self.assertEqual(classify_task("```\nprint(1)\n```"), "coding")
+        self.assertEqual(classify_task("latest news on AI"), "research")
+        self.assertEqual(classify_task("compare the two options"), "research")
+        self.assertEqual(classify_task("explain why the sky is blue"), "reasoning")
+        self.assertEqual(classify_task("help me decide"), "reasoning")
+        self.assertEqual(classify_task("hello, how are you?"), "chat")
+        self.assertEqual(classify_task(""), "chat")
+
+    def test_classify_coding_wins_over_reasoning(self):
+        from .router import classify_task
+
+        # "why" is a reasoning marker, but the message is about code.
+        self.assertEqual(
+            classify_task("why does this python script fail?"), "coding"
+        )
+
+    def test_is_free_model(self):
+        from .router import is_free_model
+
+        self.assertTrue(is_free_model("google/gemma-4-31b-it:free"))
+        self.assertFalse(is_free_model("google/gemini-4-carbon"))
+        self.assertFalse(is_free_model("gemini-3.8-flash"))
+        self.assertFalse(is_free_model(""))
+
+    def test_policy_entries_are_all_free_and_catalogued(self):
+        """The policy table itself must never contain a paid id or
+        an id the catalogue does not serve — the table is data, and
+        data rots."""
+        from . import ai
+        from .router import POLICY, is_free_model
+
+        for task, entries in POLICY.items():
+            self.assertTrue(entries, f"empty policy for {task}")
+            for provider, model in entries:
+                self.assertTrue(
+                    is_free_model(model), f"{task} policy is not free: {model}"
+                )
+                catalogue_ids = {
+                    mid for mid, _ in ai.PROVIDERS[provider]["models"]
+                }
+                self.assertIn(model, catalogue_ids)
+
+    @mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "o"})
+    def test_route_task_picks_free_policy_model(self):
+        from . import ai
+
+        provider, model = ai.route_task(
+            [{"role": "user", "content": "fix this python bug"}]
+        )
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(model, "cohere/north-mini-code:free")
+
+    @mock.patch.dict("os.environ", {}, clear=True)
+    def test_route_task_degrades_to_default_when_nothing_configured(self):
+        from . import ai
+
+        provider, model = ai.route_task(
+            [{"role": "user", "content": "fix this python bug"}]
+        )
+        # No provider configured: the long-standing default, not a
+        # failure — the call then fails cleanly as 'unavailable'.
+        self.assertEqual(provider, ai.DEFAULT_PROVIDER)
+        self.assertEqual(model, ai.default_model(provider))
+
+    @mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "o"})
+    def test_route_task_skips_non_free_policy_entry(self):
+        """The hard rule is enforced at resolution time, not trusted
+        to the table: a policy entry that stops being free is
+        skipped, never silently escalated into."""
+        from . import ai
+        from . import router
+
+        rigged = {"coding": [("openrouter", "some/paid-model")]}
+        with mock.patch.object(router, "POLICY", rigged):
+            provider, model = ai.route_task(
+                [{"role": "user", "content": "fix this bug"}]
+            )
+        self.assertNotEqual(model, "some/paid-model")
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(model, ai.default_model("openrouter"))
+
+
+class LedgerTests(LoggedInTestCase):
+    """Phase 3: cost estimates are honest (free = 0, unknown = NULL)
+    and the usage readout is owner-scoped."""
+
+    def test_estimate_cost_free_is_zero_unknown_is_none(self):
+        from .ledger import estimate_cost_usd
+
+        self.assertEqual(
+            estimate_cost_usd("openrouter", "x:free", 10, 5), 0.0
+        )
+        # Free stays free even when the counts are unknown.
+        self.assertEqual(
+            estimate_cost_usd("openrouter", "x:free", None, None), 0.0
+        )
+        self.assertIsNone(
+            estimate_cost_usd("gemini", "gemini-3.8-flash", 10, 5)
+        )
+        self.assertIsNone(
+            estimate_cost_usd("gemini", "gemini-3.8-flash", None, None)
+        )
+
+    def test_record_usage_creates_row(self):
+        from .ledger import record_usage
+        from .models import Usage
+
+        row = record_usage(
+            self.user,
+            "openrouter",
+            "google/gemma-4-31b-it:free",
+            "chat",
+            Usage.Kind.CHAT,
+            {"prompt_tokens": 10, "completion_tokens": 5},
+        )
+        self.assertEqual(row.estimated_cost_usd, 0.0)
+        self.assertEqual(row.prompt_tokens, 10)
+        self.assertEqual(Usage.objects.count(), 1)
+
+    def test_record_usage_without_counts_stays_null(self):
+        from .ledger import record_usage
+        from .models import Usage
+
+        row = record_usage(
+            self.user, "groq", "llama-3.3-70b-versatile", "chat",
+            Usage.Kind.STREAM, None,
+        )
+        self.assertIsNone(row.prompt_tokens)
+        self.assertIsNone(row.estimated_cost_usd)
+
+    def test_usage_endpoint_requires_login(self):
+        response = Client().get("/api/usage/")
+        self.assertEqual(response.status_code, 401)
+
+    def test_usage_endpoint_totals_and_recent(self):
+        from .ledger import record_usage
+        from .models import Usage
+
+        record_usage(
+            self.user, "openrouter", "x:free", "chat", Usage.Kind.CHAT,
+            {"prompt_tokens": 10, "completion_tokens": 5},
+        )
+        record_usage(
+            self.user, "gemini", "gemini-3.8-flash", "chat",
+            Usage.Kind.CHAT, {"prompt_tokens": 7, "completion_tokens": 3},
+        )
+        data = self.client.get("/api/usage/").json()
+        self.assertEqual(data["totals"]["calls"], 2)
+        self.assertEqual(data["totals"]["prompt_tokens"], 17)
+        self.assertEqual(data["totals"]["completion_tokens"], 8)
+        self.assertEqual(data["totals"]["estimated_cost_usd"], 0.0)
+        self.assertEqual(data["totals"]["unknown_cost_calls"], 1)
+        self.assertEqual(len(data["recent"]), 2)
+        self.assertEqual(data["recent"][0]["provider"], "gemini")
+
+    def test_usage_endpoint_hides_other_users_rows(self):
+        from django.contrib.auth import get_user_model
+
+        from .ledger import record_usage
+        from .models import Usage
+
+        other = get_user_model().objects.create_user("other", password="x")
+        record_usage(
+            other, "openrouter", "x:free", "chat", Usage.Kind.CHAT,
+            {"prompt_tokens": 99, "completion_tokens": 99},
+        )
+        data = self.client.get("/api/usage/").json()
+        self.assertEqual(data["totals"]["calls"], 0)
+        self.assertEqual(data["recent"], [])
+
+
+class CatalogueTests(TestCase):
+    """Phase 3: the self-check compares ids purely and reports
+    unreachable providers as unchecked, never dead."""
+
+    def test_check_ids(self):
+        from .catalogue import check_ids
+
+        alive, dead = check_ids(["a", "b", "c"], {"a", "c", "d"})
+        self.assertEqual(alive, ["a", "c"])
+        self.assertEqual(dead, ["b"])
+
+    def test_live_model_ids_openai_format(self):
+        from .catalogue import live_model_ids
+
+        def fake_fetch(url, headers=None, timeout=20):
+            self.assertIn("groq", url)
+            self.assertEqual(headers["Authorization"], "Bearer g-key")
+            return {"data": [{"id": "m1"}, {"id": "m2"}]}
+
+        ids, error = live_model_ids("groq", "g-key", fake_fetch)
+        self.assertIsNone(error)
+        self.assertEqual(ids, {"m1", "m2"})
+
+    def test_live_model_ids_openrouter_needs_no_key(self):
+        from .catalogue import live_model_ids
+
+        def fake_fetch(url, headers=None, timeout=20):
+            return {"data": [{"id": "x:free"}]}
+
+        ids, error = live_model_ids("openrouter", "", fake_fetch)
+        self.assertIsNone(error)
+        self.assertEqual(ids, {"x:free"})
+
+    def test_live_model_ids_gemini_strips_prefix(self):
+        from .catalogue import live_model_ids
+
+        def fake_fetch(url, headers=None, timeout=20):
+            self.assertIn("key=gem-key", url)
+            return {"models": [{"name": "models/gemini-3.8-flash"}]}
+
+        ids, error = live_model_ids("gemini", "gem-key", fake_fetch)
+        self.assertIsNone(error)
+        self.assertEqual(ids, {"gemini-3.8-flash"})
+
+    def test_live_model_ids_no_key_is_unchecked_not_dead(self):
+        from .catalogue import live_model_ids
+
+        ids, error = live_model_ids("groq", "", lambda *a, **k: {})
+        self.assertEqual(ids, set())
+        self.assertIn("no API key", error)
+
+    def test_live_model_ids_fetch_failure_is_unchecked(self):
+        from .catalogue import live_model_ids
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("network down")
+
+        ids, error = live_model_ids("groq", "g-key", boom)
+        self.assertEqual(ids, set())
+        self.assertIn("network down", error)
+
+    def test_check_provider_verdicts(self):
+        from .catalogue import check_provider
+
+        ok = check_provider(
+            "openrouter", ["x:free"], "",
+            lambda *a, **k: {"data": [{"id": "x:free"}]},
+        )
+        self.assertEqual(ok["status"], "ok")
+        dead = check_provider(
+            "openrouter", ["gone-model"], "",
+            lambda *a, **k: {"data": [{"id": "x:free"}]},
+        )
+        self.assertEqual(dead["status"], "dead")
+        self.assertEqual(dead["dead"], ["gone-model"])
+        unchecked = check_provider("groq", ["m1"], "", lambda *a, **k: {})
+        self.assertEqual(unchecked["status"], "unchecked")
+
+    def test_command_fails_on_dead_ids_passes_otherwise(self):
+        from io import StringIO
+
+        from django.core.management import CommandError, call_command
+
+        from . import catalogue
+
+        live = {"data": [{"id": mid} for mid in ["kept-model"]]}
+        with mock.patch.object(
+            catalogue, "fetch_json", return_value=live
+        ), mock.patch.dict(
+            "os.environ",
+            {"GROQ_API_KEY": "g", "OPENROUTER_API_KEY": "o",
+             "NVIDIA_API_KEY": "n", "DEEPSEEK_API_KEY": "d",
+             "GEMINI_API_KEY": "gem"},
+        ):
+            # Every catalogue id is missing from the stubbed live
+            # list, so the command must fail with dead-id warnings.
+            with self.assertRaises(CommandError):
+                call_command("check_catalogue", stdout=StringIO())
+
+
+class GeminiToolTests(TestCase):
+    """Phase 3: Gemini native function calling, normalized to the
+    OpenAI shape the agent loop speaks."""
+
+    def test_gemini_schema_uppercases_types(self):
+        from .ai import _gemini_schema
+
+        converted = _gemini_schema(
+            {
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["expression"],
+            }
+        )
+        self.assertEqual(converted["type"], "OBJECT")
+        self.assertEqual(converted["properties"]["expression"]["type"], "STRING")
+        self.assertEqual(converted["properties"]["count"]["type"], "INTEGER")
+        self.assertEqual(converted["properties"]["tags"]["type"], "ARRAY")
+        self.assertEqual(converted["properties"]["tags"]["items"]["type"], "STRING")
+        self.assertEqual(converted["required"], ["expression"])
+
+    def test_gemini_contents_converts_tool_flow(self):
+        from .ai import _gemini_contents
+
+        contents, system = _gemini_contents(
+            [
+                {"role": "system", "content": "Be helpful."},
+                {"role": "user", "content": "What is 2+2?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "function": {
+                                "name": "calculator",
+                                "arguments": '{"expression": "2+2"}',
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call-1", "content": "2+2 = 4"},
+            ]
+        )
+        self.assertEqual(system, "Be helpful.")
+        self.assertEqual(contents[0]["role"], "user")
+        model_turn = contents[1]
+        self.assertEqual(model_turn["role"], "model")
+        call = model_turn["parts"][0]["functionCall"]
+        self.assertEqual(call["name"], "calculator")
+        self.assertEqual(call["args"], {"expression": "2+2"})
+        fn_turn = contents[2]
+        self.assertEqual(fn_turn["role"], "function")
+        resp = fn_turn["parts"][0]["functionResponse"]
+        self.assertEqual(resp["name"], "calculator")
+        self.assertEqual(resp["response"], {"result": "2+2 = 4"})
+
+    def test_gemini_contents_merges_consecutive_tool_results(self):
+        from .ai import _gemini_contents
+
+        contents, _ = _gemini_contents(
+            [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {"id": "c1", "function": {"name": "a", "arguments": "{}"}},
+                        {"id": "c2", "function": {"name": "b", "arguments": "{}"}},
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+                {"role": "tool", "tool_call_id": "c2", "content": "r2"},
+            ]
+        )
+        fn_turns = [c for c in contents if c["role"] == "function"]
+        self.assertEqual(len(fn_turns), 1)
+        self.assertEqual(len(fn_turns[0]["parts"]), 2)
+
+    @mock.patch.dict("os.environ", {"GEMINI_API_KEY": "gem"})
+    @mock.patch("chat.ai._post_json")
+    def test_chat_completion_gemini_function_call(self, post):
+        from . import ai
+
+        post.return_value = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "functionCall": {
+                                    "name": "calculator",
+                                    "args": {"expression": "2+2"},
+                                }
+                            }
+                        ]
+                    }
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 3},
+        }
+        seen = {}
+        message = ai.chat_completion(
+            "gemini",
+            [{"role": "user", "content": "What is 2+2?"}],
+            "gemini-3.8-flash",
+            tools=[{"type": "function", "function": {"name": "calculator",
+                    "description": "maths",
+                    "parameters": {"type": "object",
+                                   "properties": {"expression": {"type": "string"}}}}}],
+            on_usage=lambda p, m, u: seen.update(usage=u),
+        )
+        self.assertEqual(len(message["tool_calls"]), 1)
+        call = message["tool_calls"][0]["function"]
+        self.assertEqual(call["name"], "calculator")
+        self.assertEqual(json.loads(call["arguments"]), {"expression": "2+2"})
+        self.assertEqual(seen["usage"], {"prompt_tokens": 12, "completion_tokens": 3})
+        payload = post.call_args[0][1]
+        decl = payload["tools"][0]["functionDeclarations"][0]
+        self.assertEqual(decl["name"], "calculator")
+        self.assertEqual(decl["parameters"]["type"], "OBJECT")
+        self.assertIn(":generateContent", post.call_args[0][0])
+
+    @mock.patch.dict("os.environ", {"GEMINI_API_KEY": "gem"})
+    def test_agent_provider_keeps_gemini_choice(self):
+        """Phase 3 removes the silent second-provider dependency:
+        a configured Gemini choice now stays on Gemini."""
+        from . import ai
+
+        self.assertEqual(
+            ai.agent_provider("gemini::gemini-3.8-flash"),
+            ("gemini", "gemini-3.8-flash"),
+        )
+
+    @mock.patch.dict("os.environ", {"GEMINI_API_KEY": "gem"})
+    @mock.patch("chat.ai._post_json")
+    def test_agent_loop_runs_tools_on_gemini(self, post):
+        """End to end through run_agent: Gemini calls the calculator,
+        the loop executes it, Gemini answers with the result."""
+        from . import agent
+
+        post.side_effect = [
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "functionCall": {
+                                        "name": "calculator",
+                                        "args": {"expression": "40+2"},
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "The answer is 42."}]}}
+                ]
+            },
+        ]
+        reply, trace = agent.run_agent(
+            [
+                {"role": "system", "content": "You are KAI."},
+                {"role": "user", "content": "What is 40+2?"},
+            ],
+            choice="gemini::gemini-3.8-flash",
+        )
+        self.assertEqual(reply, "The answer is 42.")
+        self.assertEqual(trace[0]["tool"], "calculator")
+        self.assertIn("42", trace[0]["result"])
+
+
+class UsageRecordingTests(LoggedInTestCase):
+    """Phase 3: provider calls land in the ledger from every path."""
+
+    def test_chat_records_usage_row(self):
+        from .models import Usage
+
+        def fake_ask(messages, model=None, on_usage=None):
+            if on_usage:
+                on_usage(
+                    "openrouter",
+                    "google/gemma-4-31b-it:free",
+                    {"prompt_tokens": 10, "completion_tokens": 5},
+                )
+            return "hi"
+
+        with mock.patch(
+            "chat.views.ai.ask_ai", side_effect=fake_ask
+        ), mock.patch("chat.views.ai.extract_facts", return_value=[]):
+            response = post_json(self.client, "/api/chat/", {"message": "hi"})
+        self.assertEqual(response.status_code, 200)
+        row = Usage.objects.get(kind=Usage.Kind.CHAT)
+        self.assertEqual(row.provider, "openrouter")
+        self.assertEqual(row.task, "chat")
+        self.assertEqual(row.estimated_cost_usd, 0.0)
+
+    def test_stream_records_usage_row_without_counts(self):
+        from .models import Usage
+
+        def fake_stream(messages, model=None, on_usage=None):
+            yield "Hi"
+            if on_usage:
+                on_usage("openrouter", "google/gemma-4-31b-it:free", None)
+
+        with mock.patch(
+            "chat.views.ai.ask_ai_stream", side_effect=fake_stream
+        ), mock.patch("chat.views.ai.extract_facts", return_value=[]):
+            response = self.client.post(
+                "/api/chat/stream/",
+                data=json.dumps({"message": "hi"}),
+                content_type="application/json",
+            )
+            b"".join(response.streaming_content)
+        row = Usage.objects.get(kind=Usage.Kind.STREAM)
+        self.assertIsNone(row.prompt_tokens)
+        self.assertEqual(row.estimated_cost_usd, 0.0)
+
+    def test_agent_records_usage_row_per_call(self):
+        from .models import Usage
+
+        def fake_completion(provider, messages, model, tools=None, on_usage=None):
+            if on_usage:
+                on_usage(provider, model, {"prompt_tokens": 3, "completion_tokens": 2})
+            return {"role": "assistant", "content": "done"}
+
+        with mock.patch(
+            "chat.agent.ai.chat_completion", side_effect=fake_completion
+        ), mock.patch("chat.views.ai.extract_facts", return_value=[]):
+            response = post_json(
+                self.client, "/api/chat/", {"message": "hi", "agent": True}
+            )
+        self.assertEqual(response.status_code, 200)
+        row = Usage.objects.get(kind=Usage.Kind.AGENT)
+        self.assertEqual(row.prompt_tokens, 3)
+
+    def test_extract_facts_forwards_usage_callback(self):
+        from . import ai
+
+        seen = {}
+
+        def fake_ask(messages, model=None, on_usage=None):
+            if on_usage:
+                on_usage("groq", "llama-3.1-8b-instant", None)
+            return '["User likes tea"]'
+
+        with mock.patch.object(ai, "ask_ai", side_effect=fake_ask):
+            facts = ai.extract_facts(
+                "I like tea", "Noted.",
+                on_usage=lambda p, m, u: seen.update(provider=p),
+            )
+        self.assertEqual(facts, ["User likes tea"])
+        self.assertEqual(seen["provider"], "groq")
+
+    def test_auto_choice_routes_through_router(self):
+        """The 'auto' picker choice reaches route_task: a coding
+        message with only OpenRouter configured goes to the code
+        model, and the explicit-pick path is untouched."""
+        from . import ai
+
+        with mock.patch.dict("os.environ", {"OPENROUTER_API_KEY": "o"}):
+            with mock.patch("chat.ai._post_json") as post:
+                post.return_value = {
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }
+                reply = ai.ask_ai(
+                    [{"role": "user", "content": "fix this python bug"}],
+                    model="auto",
+                )
+        self.assertEqual(reply, "ok")
+        self.assertEqual(
+            post.call_args[0][1]["model"], "cohere/north-mini-code:free"
+        )
