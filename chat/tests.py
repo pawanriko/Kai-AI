@@ -727,6 +727,275 @@ class MemoryWorkflowTests(LoggedInTestCase):
         self.assertEqual(Memory.objects.count(), 0)
 
 
+# ---------------------------------------------------------------- Phase 4
+
+class DedupeTests(TestCase):
+    def test_identical_and_case_variants_are_duplicates(self):
+        from . import dedupe
+
+        self.assertTrue(
+            dedupe.is_near_duplicate("My name is Pawan", "my name is pawan")
+        )
+        self.assertTrue(
+            dedupe.is_near_duplicate(
+                "My name is Pawan Kumar.", "my name is pawan kumar"
+            )
+        )
+
+    def test_distinct_facts_are_not_duplicates(self):
+        from . import dedupe
+
+        self.assertFalse(
+            dedupe.is_near_duplicate(
+                "My name is Pawan", "My exam is on Friday morning"
+            )
+        )
+
+    def test_containment_counts_when_the_shorter_fact_is_substantive(self):
+        from . import dedupe
+
+        self.assertTrue(
+            dedupe.is_near_duplicate(
+                "Pawan studies at IITM Janakpuri in New Delhi",
+                "Pawan studies at IITM Janakpuri",
+            )
+        )
+
+    def test_grouping_is_transitive(self):
+        from . import dedupe
+
+        memories = [
+            Memory(fact="Pawan studies BCA at IITM Janakpuri college"),
+            Memory(fact="Pawan studies BCA at IITM Janakpuri"),
+            Memory(fact="Pawan studies BCA at IITM"),
+            Memory(fact="The sky is blue today"),
+        ]
+        groups = dedupe.group_duplicates(memories)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0]), 3)
+
+    def test_keeper_prefers_confirmed_then_oldest(self):
+        from . import dedupe
+        from django.utils import timezone
+        import datetime
+
+        older = Memory(
+            fact="Pawan studies at IITM",
+            status=Memory.Status.SUGGESTED,
+            created_at=timezone.now() - datetime.timedelta(days=2),
+        )
+        older.pk = 1
+        newer = Memory(
+            fact="Pawan studies at IITM Janakpuri",
+            status=Memory.Status.CONFIRMED,
+            created_at=timezone.now(),
+        )
+        newer.pk = 2
+        self.assertIs(dedupe.pick_keeper([older, newer]), newer)
+
+
+class MemoryUpgradeTests(LoggedInTestCase):
+    def _memory(self, fact, **kwargs):
+        kwargs.setdefault("user", self.user)
+        return Memory.objects.create(fact=fact, **kwargs)
+
+    def test_list_search_filters_case_insensitively(self):
+        self._memory("Pawan studies at IITM")
+        self._memory("Pawan likes mangoes")
+        data = self.client.get("/api/memories/", {"q": "iitm"}).json()
+        facts = [m["fact"] for m in data["memories"]]
+        self.assertEqual(facts, ["Pawan studies at IITM"])
+
+    def test_list_project_filter_and_scope_endpoint(self):
+        memory = self._memory("KAI uses Django", project="kai")
+        self._memory("HireSense uses Django", project="hiresense")
+        data = self.client.get("/api/memories/", {"project": "KAI"}).json()
+        self.assertEqual(len(data["memories"]), 1)
+        self.assertEqual(data["memories"][0]["project"], "kai")
+
+        response = post_json(
+            self.client,
+            f"/api/memories/{memory.pk}/scope/",
+            {"project": "portfolio"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["project"], "portfolio")
+        memory.refresh_from_db()
+        self.assertEqual(memory.project, "portfolio")
+
+        response = post_json(
+            self.client, f"/api/memories/{memory.pk}/scope/", {"project": ""}
+        )
+        self.assertEqual(response.json()["project"], "")
+
+    def test_list_status_filter_and_invalid_status(self):
+        self._memory("A", status=Memory.Status.CONFIRMED)
+        self._memory("B", status=Memory.Status.SUGGESTED)
+        data = self.client.get(
+            "/api/memories/", {"status": "confirmed"}
+        ).json()
+        self.assertEqual([m["fact"] for m in data["memories"]], ["A"])
+        response = self.client.get("/api/memories/", {"status": "bogus"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_add_creates_confirmed_stated_fact(self):
+        response = post_json(
+            self.client,
+            "/api/memories/add/",
+            {"fact": "My exam is Friday", "project": "college"},
+        )
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["status"], "confirmed")
+        self.assertEqual(body["origin"], "stated")
+        self.assertEqual(body["project"], "college")
+        memory = Memory.objects.get()
+        self.assertEqual(memory.user, self.user)
+
+    def test_add_rejects_empty_and_near_duplicate_facts(self):
+        self.assertEqual(
+            post_json(self.client, "/api/memories/add/", {"fact": "  "}).status_code,
+            400,
+        )
+        self._memory("Pawan studies at IITM Janakpuri")
+        response = post_json(
+            self.client,
+            "/api/memories/add/",
+            {"fact": "pawan studies at iitm janakpuri!"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Memory.objects.count(), 1)
+
+    def test_add_respects_the_memory_cap(self):
+        self._memory("One fact")
+        with mock.patch("chat.views.MAX_MEMORIES_PER_USER", 1):
+            response = post_json(
+                self.client,
+                "/api/memories/add/",
+                {"fact": "A second fact"},
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Memory.objects.count(), 1)
+
+    def test_duplicates_endpoint_groups_and_names_the_keeper(self):
+        confirmed = self._memory(
+            "Pawan studies BCA at IITM Janakpuri",
+            status=Memory.Status.CONFIRMED,
+        )
+        self._memory("Pawan studies BCA at IITM Janakpuri college")
+        self._memory("Pawan likes mangoes")
+        data = self.client.get("/api/memories/duplicates/").json()
+        self.assertEqual(len(data["groups"]), 1)
+        group = data["groups"][0]
+        self.assertEqual(group["keeper"]["id"], confirmed.pk)
+        self.assertEqual(len(group["members"]), 2)
+
+    def test_merge_deletes_drops_and_keeps_the_keeper(self):
+        keeper = self._memory(
+            "Pawan studies BCA at IITM", status=Memory.Status.CONFIRMED
+        )
+        drop = self._memory("Pawan studies BCA at IITM Janakpuri")
+        other = self._memory("Pawan likes mangoes")
+        response = post_json(
+            self.client,
+            "/api/memories/merge/",
+            {"keep_id": keeper.pk, "drop_ids": [drop.pk]},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"kept": keeper.pk, "deleted": 1})
+        self.assertEqual(
+            set(Memory.objects.values_list("pk", flat=True)),
+            {keeper.pk, other.pk},
+        )
+
+    def test_merge_rejects_bad_payloads_and_foreign_rows(self):
+        keeper = self._memory("Pawan studies BCA at IITM")
+        drop = self._memory("Pawan studies BCA at IITM Janakpuri")
+        self.assertEqual(
+            post_json(
+                self.client,
+                "/api/memories/merge/",
+                {"keep_id": keeper.pk, "drop_ids": [keeper.pk]},
+            ).status_code,
+            400,
+        )
+        stranger = get_user_model().objects.create_user(
+            username="stranger", password="pw"
+        )
+        foreign = Memory.objects.create(
+            fact="Pawan studies BCA at IITM college", user=stranger
+        )
+        self.assertEqual(
+            post_json(
+                self.client,
+                "/api/memories/merge/",
+                {"keep_id": keeper.pk, "drop_ids": [foreign.pk]},
+            ).status_code,
+            404,
+        )
+        self.assertEqual(Memory.objects.count(), 3)
+        self.assertEqual(drop.pk, Memory.objects.get(pk=drop.pk).pk)
+
+    def test_export_json_and_markdown_are_owner_filtered(self):
+        self._memory(
+            "Pawan studies at IITM",
+            status=Memory.Status.CONFIRMED,
+            project="kai",
+        )
+        stranger = get_user_model().objects.create_user(
+            username="stranger", password="pw"
+        )
+        Memory.objects.create(fact="Stranger secret", user=stranger)
+        response = self.client.get("/api/memories/export/", {"format": "json"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("attachment", response["Content-Disposition"])
+        payload = json.loads(response.content)
+        self.assertEqual(len(payload["memories"]), 1)
+        self.assertEqual(payload["memories"][0]["project"], "kai")
+
+        response = self.client.get("/api/memories/export/", {"format": "md"})
+        text = response.content.decode()
+        self.assertIn("## Confirmed", text)
+        self.assertIn("- Pawan studies at IITM [kai]", text)
+        self.assertNotIn("Stranger secret", text)
+
+        self.assertEqual(
+            self.client.get(
+                "/api/memories/export/", {"format": "pdf"}
+            ).status_code,
+            400,
+        )
+
+    def test_export_requires_login(self):
+        self.client.logout()
+        self.assertEqual(
+            self.client.get("/api/memories/export/").status_code, 401
+        )
+
+    @mock.patch("chat.views.ai.ask_ai", return_value="ok")
+    @mock.patch(
+        "chat.views.ai.extract_facts",
+        return_value=["pawan studies at iitm janakpuri college"],
+    )
+    def test_harvest_skips_near_duplicates(self, _facts, _ask):
+        self._memory(
+            "Pawan studies at IITM Janakpuri",
+            status=Memory.Status.CONFIRMED,
+        )
+        post_json(self.client, "/api/chat/", {"message": "remember this"})
+        self.assertEqual(Memory.objects.count(), 1)
+
+    @mock.patch("chat.views.ai.ask_ai", return_value="ok")
+    @mock.patch(
+        "chat.views.ai.extract_facts", return_value=["A brand new fact"]
+    )
+    def test_harvested_fact_is_inferred_and_suggested(self, _facts, _ask):
+        post_json(self.client, "/api/chat/", {"message": "hi"})
+        memory = Memory.objects.get()
+        self.assertEqual(memory.origin, Memory.Origin.INFERRED)
+        self.assertEqual(memory.status, Memory.Status.SUGGESTED)
+
+
 class SetupSecurityTests(TestCase):
     """Bootstrap-token gate on /api/auth/setup/ (post-Phase-1 review).
 

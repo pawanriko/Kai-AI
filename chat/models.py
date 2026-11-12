@@ -96,6 +96,16 @@ class Memory(models.Model):
         SUGGESTED = "suggested", "Suggested"
         CONFIRMED = "confirmed", "Confirmed"
 
+    class Origin(models.TextChoices):
+        # Phase 4: how the fact arrived. INFERRED facts are AI
+        # extractions (they start SUGGESTED, behind the confirmation
+        # gate); STATED facts were typed by the user themselves
+        # (they start CONFIRMED — no gate needed for the user's own
+        # words). Existing rows are all AI extractions, hence the
+        # default.
+        INFERRED = "inferred", "Inferred"
+        STATED = "stated", "Stated"
+
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -109,6 +119,18 @@ class Memory(models.Model):
         choices=Status.choices,
         default=Status.SUGGESTED,
     )
+    origin = models.CharField(
+        max_length=16,
+        choices=Origin.choices,
+        default=Origin.INFERRED,
+    )
+    # Phase 4: project scope. Blank means global — the fact applies
+    # everywhere. A label (e.g. "kai") scopes the fact to that
+    # project for searching, filtering, and export. Scoping is
+    # organizational: confirmed facts still reach every system
+    # prompt (there is no conversation→project link to filter on),
+    # so scope never silently hides knowledge from the AI.
+    project = models.CharField(max_length=60, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

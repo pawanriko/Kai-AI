@@ -30,10 +30,23 @@ urlpatterns = [
         name="conversation-delete",
     ),
     path("memories/", views.memory_list, name="memory-list"),
+    path("memories/add/", views.memory_add, name="memory-add"),
+    path(
+        "memories/duplicates/",
+        views.memory_duplicates,
+        name="memory-duplicates",
+    ),
+    path("memories/merge/", views.memory_merge, name="memory-merge"),
+    path("memories/export/", views.memory_export, name="memory-export"),
     path(
         "memories/<int:pk>/confirm/",
         views.memory_confirm,
         name="memory-confirm",
+    ),
+    path(
+        "memories/<int:pk>/scope/",
+        views.memory_scope,
+        name="memory-scope",
     ),
     path(
         "memories/<int:pk>/reject/",

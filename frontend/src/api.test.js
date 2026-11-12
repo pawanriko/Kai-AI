@@ -9,14 +9,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  addMemory,
   confirmMemory,
+  exportMemories,
   getMe,
   listConversations,
+  listDuplicates,
+  listMemories,
   listUsage,
   login,
   logout,
+  mergeMemories,
   rejectMemory,
   sendChatStream,
+  setMemoryScope,
   setupOwner,
 } from './api'
 
@@ -266,5 +272,69 @@ describe('api.js auth + CSRF', () => {
     const [url, options] = fetchMock.mock.calls[0]
     expect(url).toBe('/api/usage/')
     expect(options.headers['X-CSRFToken']).toBeUndefined()
+  })
+
+  it('lists memories with search and project params encoded', async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { memories: [] }))
+    await listMemories({ q: 'iit&m', project: 'kai', status: '' })
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/memories/?q=iit%26m&project=kai')
+    expect(options.headers['X-CSRFToken']).toBeUndefined()
+  })
+
+  it('lists memories without params on the bare route', async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { memories: [] }))
+    await listMemories()
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/memories/')
+  })
+
+  it('adds a memory via POST with fact and project', async () => {
+    const fetchMock = mockFetch(jsonResponse(201, { id: 9 }))
+    await addMemory('My exam is Friday', 'college')
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/memories/add/')
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body)).toEqual({
+      fact: 'My exam is Friday',
+      project: 'college',
+    })
+    expect(options.headers['X-CSRFToken']).toBe('fresh-token-123')
+  })
+
+  it('sets a memory scope via POST', async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { id: 9, project: 'kai' }))
+    await setMemoryScope(9, 'kai')
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/memories/9/scope/')
+    expect(JSON.parse(options.body)).toEqual({ project: 'kai' })
+  })
+
+  it('lists duplicate groups and merges with keep + drops', async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { groups: [] }))
+    await listDuplicates()
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/memories/duplicates/')
+
+    const mergeMock = mockFetch(jsonResponse(200, { kept: 2, deleted: 1 }))
+    await mergeMemories(2, [3, 4])
+    const [url, options] = mergeMock.mock.calls[0]
+    expect(url).toBe('/api/memories/merge/')
+    expect(JSON.parse(options.body)).toEqual({
+      keep_id: 2,
+      drop_ids: [3, 4],
+    })
+  })
+
+  it('exports memories as a blob with the format param', async () => {
+    const blob = new Blob(['{}'])
+    const fetchMock = mockFetch({
+      ok: true,
+      status: 200,
+      blob: async () => blob,
+    })
+    const result = await exportMemories('md', 'kai')
+    expect(result).toBe(blob)
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/memories/export/?format=md&project=kai'
+    )
   })
 })

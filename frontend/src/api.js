@@ -179,8 +179,53 @@ export function deleteConversation(id) {
   return request(`/api/conversations/${id}/delete/`, { method: 'DELETE' })
 }
 
-export function listMemories() {
-  return request('/api/memories/')
+export function listMemories(params = {}) {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value) query.set(key, value)
+  }
+  const suffix = query.toString()
+  return request(suffix ? `/api/memories/?${suffix}` : '/api/memories/')
+}
+
+export function addMemory(fact, project) {
+  return request('/api/memories/add/', {
+    method: 'POST',
+    body: JSON.stringify({ fact, project: project || '' }),
+  })
+}
+
+export function setMemoryScope(id, project) {
+  return request(`/api/memories/${id}/scope/`, {
+    method: 'POST',
+    body: JSON.stringify({ project }),
+  })
+}
+
+export function listDuplicates() {
+  return request('/api/memories/duplicates/')
+}
+
+export function mergeMemories(keepId, dropIds) {
+  return request('/api/memories/merge/', {
+    method: 'POST',
+    body: JSON.stringify({ keep_id: keepId, drop_ids: dropIds }),
+  })
+}
+
+// Export is a file download, not JSON: fetch it directly and hand
+// the caller a Blob. Errors still surface as thrown Errors with a
+// status, like request().
+export async function exportMemories(format, project) {
+  const query = new URLSearchParams({ format })
+  if (project) query.set('project', project)
+  const response = await fetch(`/api/memories/export/?${query}`)
+  if (!response.ok) {
+    const error = new Error(`Request failed (${response.status})`)
+    error.status = response.status
+    throw error
+  }
+  return response.blob()
 }
 
 export function confirmMemory(id) {

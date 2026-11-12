@@ -16,8 +16,13 @@
     GET    /api/conversations/<id>/    → one conversation     (login)
     DELETE /api/conversations/<id>/delete/                    (login)
     GET    /api/memories/              → stored facts         (login)
+    POST   /api/memories/add/          → add a fact directly  (login)
+    GET    /api/memories/duplicates/   → near-duplicate groups(login)
+    POST   /api/memories/merge/        → merge a group        (login)
+    GET    /api/memories/export/       → JSON/Markdown export (login)
     POST   /api/memories/<id>/confirm/ → approve a suggestion (login)
     POST   /api/memories/<id>/reject/  → drop a suggestion    (login)
+    POST   /api/memories/<id>/scope/   → set project scope    (login)
     DELETE /api/memories/<id>/delete/                         (login)
 
 Phase 1 security shape: everything except ping + the auth endpoints
@@ -44,13 +49,13 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, OperationalError, transaction
 from django.db.models import Q
-from django.http import JsonResponse, StreamingHttpResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
-from . import agent, ai, coding_tools, ledger, router
+from . import agent, ai, coding_tools, dedupe, ledger, router
 from .models import Conversation, Memory, Message, SetupGuard, Usage
 from .ratelimit import rate_limit
 
@@ -479,6 +484,7 @@ def _harvest_memories(request, user_text, reply, on_usage=None):
     if visible.count() >= MAX_MEMORIES_PER_USER:
         return
     known = {m.fact.lower() for m in visible}
+    known_facts = [m.fact for m in visible]
     for fact in ai.extract_facts(user_text, reply, on_usage=on_usage):
         fact = fact.strip()[:MAX_FACT_CHARS]
         lowered = fact.lower()
@@ -486,12 +492,21 @@ def _harvest_memories(request, user_text, reply, on_usage=None):
             continue
         if any(marker in lowered for marker in _INSTRUCTION_MARKERS):
             continue
+        # Phase 4: skip near-duplicates too — a fact KAI already
+        # knows in slightly different words must not spawn a second
+        # suggestion the user then has to merge by hand.
+        if any(
+            dedupe.is_near_duplicate(fact, known_fact)
+            for known_fact in known_facts
+        ):
+            continue
         Memory.objects.create(
             fact=fact,
             user=request.user,
             status=Memory.Status.SUGGESTED,
         )
         known.add(lowered)
+        known_facts.append(fact)
 
 
 def _persist_exchange(
@@ -745,19 +760,204 @@ def conversation_delete(request, pk):
     return JsonResponse({}, status=204)
 
 
+def _memory_dict(memory):
+    return {
+        "id": memory.pk,
+        "fact": memory.fact,
+        "status": memory.status,
+        "origin": memory.origin,
+        "project": memory.project,
+        "created_at": memory.created_at.isoformat(),
+    }
+
+
+def _json_body(request):
+    """Parsed JSON body, or None when the body is not JSON."""
+    try:
+        return json.loads(request.body or b"{}")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
 @login_required_json
 def memory_list(request):
-    """GET /api/memories/ → every visible fact, with its status."""
-    data = [
-        {
-            "id": m.pk,
-            "fact": m.fact,
-            "status": m.status,
-            "created_at": m.created_at.isoformat(),
-        }
-        for m in _visible_memories(request)
-    ]
-    return JsonResponse({"memories": data})
+    """GET /api/memories/ → every visible fact, with its status.
+
+    Phase 4 filters: ?q=<text> searches fact text (case-insensitive
+    substring), ?project=<name> keeps one project scope (blank
+    keeps only unscoped facts), ?status=suggested|confirmed.
+    """
+    rows = _visible_memories(request)
+    query = request.GET.get("q", "").strip()
+    if query:
+        rows = rows.filter(fact__icontains=query)
+    if "project" in request.GET:
+        rows = rows.filter(project__iexact=request.GET["project"].strip())
+    status = request.GET.get("status", "").strip()
+    if status:
+        if status not in Memory.Status.values:
+            return JsonResponse(
+                {"error": f"unknown status: {status}"}, status=400
+            )
+        rows = rows.filter(status=status)
+    return JsonResponse({"memories": [_memory_dict(m) for m in rows]})
+
+
+@login_required_json
+@require_POST
+def memory_add(request):
+    """POST /api/memories/add/ {"fact", "project"?} → the fact, saved.
+
+    The user typed it themselves, so it lands CONFIRMED with origin
+    STATED — the confirmation gate exists for AI inferences, not
+    for the user's own words. Empty facts, facts that duplicate
+    (near or exact) a visible fact, and the memory cap are all
+    refused with 400 rather than silently creating noise.
+    """
+    body = _json_body(request)
+    if body is None:
+        return JsonResponse({"error": "invalid JSON"}, status=400)
+    fact = str(body.get("fact", "")).strip()[:MAX_FACT_CHARS]
+    if not fact:
+        return JsonResponse({"error": "fact is required"}, status=400)
+    project = str(body.get("project", "")).strip()[:60]
+    visible = _visible_memories(request)
+    if visible.count() >= MAX_MEMORIES_PER_USER:
+        return JsonResponse(
+            {"error": "memory is full — forget something first"},
+            status=400,
+        )
+    if any(
+        dedupe.is_near_duplicate(fact, m.fact) for m in visible
+    ):
+        return JsonResponse(
+            {"error": "a similar fact is already remembered"},
+            status=400,
+        )
+    memory = Memory.objects.create(
+        fact=fact,
+        user=request.user,
+        status=Memory.Status.CONFIRMED,
+        origin=Memory.Origin.STATED,
+        project=project,
+    )
+    return JsonResponse(_memory_dict(memory), status=201)
+
+
+@login_required_json
+@require_POST
+def memory_scope(request, pk):
+    """POST /api/memories/<id>/scope/ {"project"} → the fact, rescoped.
+
+    An empty project clears the scope (the fact becomes global).
+    """
+    body = _json_body(request)
+    if body is None:
+        return JsonResponse({"error": "invalid JSON"}, status=400)
+    memory = _claim(
+        get_object_or_404(_visible_memories(request), pk=pk), request
+    )
+    memory.project = str(body.get("project", "")).strip()[:60]
+    memory.save(update_fields=["project"])
+    return JsonResponse(_memory_dict(memory))
+
+
+@login_required_json
+def memory_duplicates(request):
+    """GET /api/memories/duplicates/ → near-duplicate groups.
+
+    Each group names the keeper (confirmed first, then oldest) and
+    lists every member. Advisory only — nothing merges until the
+    user posts to /merge/.
+    """
+    groups = []
+    for group in dedupe.group_duplicates(_visible_memories(request)):
+        keeper = dedupe.pick_keeper(group)
+        groups.append(
+            {
+                "keeper": _memory_dict(keeper),
+                "members": [_memory_dict(m) for m in group],
+            }
+        )
+    return JsonResponse({"groups": groups})
+
+
+@login_required_json
+@require_POST
+def memory_merge(request):
+    """POST /api/memories/merge/ {"keep_id", "drop_ids": [...]} →
+    {"kept": id, "deleted": n}. Every id must be a visible memory;
+    the keeper is never deleted. Explicit user action only — the
+    duplicates endpoint never merges on its own.
+    """
+    body = _json_body(request)
+    if body is None:
+        return JsonResponse({"error": "invalid JSON"}, status=400)
+    keep_id = body.get("keep_id")
+    drop_ids = body.get("drop_ids") or []
+    if not keep_id or not isinstance(drop_ids, list) or not drop_ids:
+        return JsonResponse(
+            {"error": "keep_id and a non-empty drop_ids list required"},
+            status=400,
+        )
+    if keep_id in drop_ids:
+        return JsonResponse(
+            {"error": "keep_id must not be in drop_ids"}, status=400
+        )
+    visible = _visible_memories(request)
+    keeper = _claim(get_object_or_404(visible, pk=keep_id), request)
+    drops = []
+    for drop_id in drop_ids:
+        drops.append(get_object_or_404(visible, pk=drop_id))
+    for memory in drops:
+        memory.delete()
+    return JsonResponse({"kept": keeper.pk, "deleted": len(drops)})
+
+
+@login_required_json
+def memory_export(request):
+    """GET /api/memories/export/?format=json|md[&project=...] →
+    the visible facts as a downloadable file. JSON is the full
+    record; Markdown groups by status for reading. Owner-filtered
+    like every other memory endpoint.
+    """
+    fmt = request.GET.get("format", "json").strip().lower()
+    if fmt not in ("json", "md"):
+        return JsonResponse(
+            {"error": "format must be json or md"}, status=400
+        )
+    rows = _visible_memories(request)
+    if "project" in request.GET:
+        rows = rows.filter(project__iexact=request.GET["project"].strip())
+    memories = list(rows)
+    if fmt == "json":
+        payload = json.dumps(
+            {"memories": [_memory_dict(m) for m in memories]},
+            indent=2,
+        )
+        response = HttpResponse(payload, content_type="application/json")
+        response["Content-Disposition"] = (
+            'attachment; filename="kai-memories.json"'
+        )
+        return response
+    lines = ["# KAI memories", ""]
+    for status in (Memory.Status.CONFIRMED, Memory.Status.SUGGESTED):
+        lines.append(f"## {status.capitalize()}")
+        lines.append("")
+        group = [m for m in memories if m.status == status]
+        if not group:
+            lines.append("_None._")
+            lines.append("")
+            continue
+        for memory in group:
+            scope = f" [{memory.project}]" if memory.project else ""
+            lines.append(f"- {memory.fact}{scope}")
+        lines.append("")
+    response = HttpResponse("\n".join(lines), content_type="text/markdown")
+    response["Content-Disposition"] = (
+        'attachment; filename="kai-memories.md"'
+    )
+    return response
 
 
 @login_required_json
