@@ -1235,6 +1235,29 @@ class AiStreamFailureTests(TestCase):
             "nvidia/nemotron-3-ultra-550b-a55b:free",
         )
 
+    def test_catalogue_has_verified_free_additions(self):
+        """Free-models commit (2026-11-12): the four additions were
+        each verified firsthand on OpenRouter's live models list
+        with $0 prompt AND completion pricing. They must be present
+        with their exact IDs, still marked free, and the default
+        must be untouched by the additions."""
+        from . import ai
+
+        ids = [
+            m["id"] for p in ai.catalog() for m in p["models"]
+        ]
+        for model_id in (
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+            "thinkingmachines/inkling-2-small:free",
+            "baidu/ernie-5.5-flash-preview:free",
+            "liquid/lfm-3-1.7b:free",
+        ):
+            self.assertIn(model_id, ids)
+        self.assertEqual(
+            ai.default_model("openrouter"),
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+        )
+
     def test_failure_before_first_chunk_falls_back(self):
         def empty():
             return iter([])

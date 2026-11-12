@@ -59,6 +59,18 @@ PROVIDERS = {
             # (see the Opus 4.6 404 on 2026-11-11).
             ("google/gemma-4-26b-a4b-it:free", "Gemma 4 26B (free)"),
             ("nvidia/nemotron-3.5-lightning:free", "Nemotron 3.5 Lightning (free)"),
+            # Free-model additions (2026-11-12): each ID verified
+            # firsthand on OpenRouter's live /api/v1/models list
+            # with pricing prompt=0 AND completion=0 at verification
+            # time, and re-checked through the Phase 3 catalogue
+            # self-check before pushing. Curated for capability mix:
+            # an explicit reasoning model, two general models from
+            # new providers, and one small/fast model. OpenRouter
+            # free models carry the 20/min + daily request caps.
+            ("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "Nemotron 3 Nano Reasoning (free)"),
+            ("thinkingmachines/inkling-2-small:free", "Inkling 2 Small (free)"),
+            ("baidu/ernie-5.5-flash-preview:free", "ERNIE 5.5 Flash (free)"),
+            ("liquid/lfm-3-1.7b:free", "LFM 3 1.7B (free)"),
             ("meta/muse-ember", "Muse Ember"),
             ("deepseek/deepseek-v3.2", "DeepSeek V3.2"),
             ("tencent/hy4", "Hy4"),
