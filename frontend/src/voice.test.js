@@ -10,12 +10,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createRecognizer,
   pickVoice,
+  resetVoiceCache,
   speak,
   speechRecognitionSupported,
   speechSynthesisSupported,
   splitSentences,
   stopSpeaking,
   voiceErrorMessage,
+  warmUpVoices,
 } from './voice'
 
 class FakeRecognition {
@@ -53,6 +55,7 @@ describe('voice helpers', () => {
     delete window.webkitSpeechRecognition
     delete window.speechSynthesis
     delete window.SpeechSynthesisUtterance
+    resetVoiceCache()
     vi.restoreAllMocks()
   })
 
@@ -208,5 +211,101 @@ describe('voice helpers', () => {
       'Three!',
     ])
     expect(splitSentences('   ')).toEqual([])
+  })
+})
+
+describe('voice warm-up', () => {
+  beforeEach(() => {
+    resetVoiceCache()
+    window.SpeechSynthesisUtterance = class {
+      constructor(text) {
+        this.text = text
+      }
+    }
+  })
+
+  afterEach(() => {
+    resetVoiceCache()
+  })
+
+  it('caches voices arriving via voiceschanged and falls back to the cache', () => {
+    let voices = []
+    const listeners = {}
+    window.speechSynthesis = {
+      getVoices: () => voices,
+      addEventListener: vi.fn((type, cb) => {
+        listeners[type] = cb
+      }),
+      speak: vi.fn(),
+      cancel: vi.fn(),
+    }
+    warmUpVoices()
+    expect(pickVoice('en-IN')).toBeNull()
+
+    const natural = { name: 'Google US English', lang: 'en-IN' }
+    voices = [natural]
+    listeners.voiceschanged()
+    // The live list goes empty again (async timing) — the cache
+    // still serves the voice instead of the flat default.
+    voices = []
+    expect(pickVoice('en-IN')).toBe(natural)
+  })
+
+  it('attaches only one voiceschanged listener', () => {
+    const addEventListener = vi.fn()
+    window.speechSynthesis = {
+      getVoices: () => [],
+      addEventListener,
+      speak: vi.fn(),
+      cancel: vi.fn(),
+    }
+    warmUpVoices()
+    warmUpVoices()
+    expect(addEventListener).toHaveBeenCalledTimes(1)
+    expect(addEventListener).toHaveBeenCalledWith(
+      'voiceschanged',
+      expect.any(Function)
+    )
+  })
+
+  it('uses onvoiceschanged when addEventListener is missing', () => {
+    const synth = {
+      getVoices: () => [],
+      speak: vi.fn(),
+      cancel: vi.fn(),
+    }
+    window.speechSynthesis = synth
+    warmUpVoices()
+    expect(typeof synth.onvoiceschanged).toBe('function')
+
+    const natural = { name: 'Google हिन्दी', lang: 'hi-IN' }
+    synth.getVoices = () => [natural]
+    synth.onvoiceschanged()
+    synth.getVoices = () => []
+    expect(pickVoice('hi-IN')).toBe(natural)
+  })
+
+  it('skips the listener when voices are already loaded', () => {
+    const addEventListener = vi.fn()
+    window.speechSynthesis = {
+      getVoices: () => [{ name: 'Google US English', lang: 'en-IN' }],
+      addEventListener,
+      speak: vi.fn(),
+      cancel: vi.fn(),
+    }
+    warmUpVoices()
+    expect(addEventListener).not.toHaveBeenCalled()
+  })
+
+  it('speaks trigger the warm-up so the first click is covered', () => {
+    const addEventListener = vi.fn()
+    window.speechSynthesis = {
+      getVoices: () => [],
+      addEventListener,
+      speak: vi.fn(),
+      cancel: vi.fn(),
+    }
+    expect(speak('Hello Kai')).toBe(true)
+    expect(addEventListener).toHaveBeenCalledTimes(1)
   })
 })

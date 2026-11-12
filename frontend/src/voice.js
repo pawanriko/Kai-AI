@@ -103,6 +103,58 @@ export function voiceErrorMessage(code) {
   }
 }
 
+// Voice-list warm-up: Chrome loads voices asynchronously —
+// getVoices() returns [] until the voiceschanged event fires,
+// which can be AFTER the first read-aloud click. Warm up at
+// module load (bundle import) so the cache is populated by the
+// time anyone speaks, and refresh it when voices arrive. The
+// cache is only a fallback: a live non-empty list always wins,
+// and a transient empty list never wipes a good cache.
+let cachedVoices = []
+let warmingUp = false
+
+export function warmUpVoices() {
+  if (!speechSynthesisSupported()) return
+  if (warmingUp) return
+  warmingUp = true
+  refreshVoiceCache()
+  if (cachedVoices.length > 0) return
+  const synth = window.speechSynthesis
+  const onVoicesChanged = () => refreshVoiceCache()
+  if (typeof synth.addEventListener === 'function') {
+    synth.addEventListener('voiceschanged', onVoicesChanged)
+  } else {
+    synth.onvoiceschanged = onVoicesChanged
+  }
+}
+
+function refreshVoiceCache() {
+  const synth = window.speechSynthesis
+  if (!synth || typeof synth.getVoices !== 'function') return
+  const voices = synth.getVoices() || []
+  if (voices.length > 0) cachedVoices = voices
+}
+
+function availableVoices() {
+  const synth = typeof window !== 'undefined' ? window.speechSynthesis : null
+  if (synth && typeof synth.getVoices === 'function') {
+    const live = synth.getVoices() || []
+    if (live.length > 0) return live
+  }
+  return cachedVoices
+}
+
+// Test-only: clear the warm-up state between tests so one test's
+// voices never leak into the next.
+export function resetVoiceCache() {
+  cachedVoices = []
+  warmingUp = false
+}
+
+// Start warming the moment the bundle loads — voices take a
+// moment to arrive, and read-aloud may be clicked at any time.
+warmUpVoices()
+
 // Speak text aloud, interrupting anything currently playing.
 // onDone fires when the LAST chunk ends or errors. Returns false
 // when speaking is impossible (unsupported or empty text).
@@ -120,6 +172,7 @@ export function speak(text, { lang, onDone } = {}) {
   if (!speechSynthesisSupported()) return false
   const trimmed = (text || '').trim()
   if (!trimmed) return false
+  warmUpVoices()
   const chunks = splitSentences(trimmed)
   const voice = pickVoice(lang || DEFAULT_VOICE_LANG)
   window.speechSynthesis.cancel()
@@ -150,16 +203,15 @@ export function splitSentences(text) {
 }
 
 // Pick the most human-sounding voice for a language from the
-// voices the browser reports. Preference order: exact-language
-// natural/neural voices first (Google/Microsoft natural voices,
-// named human voices), then any exact-language voice, then any
-// voice in the same language family. Returns null when no voices
-// are reported (Chrome loads them asynchronously — the browser
-// default is used instead) or the list has no match.
+// voices the browser reports (live list first, warm-up cache
+// when the live list is momentarily empty). Preference order:
+// exact-language natural/neural voices first (Google/Microsoft
+// natural voices, named human voices), then any exact-language
+// voice, then any voice in the same language family. Returns
+// null when no voices are known yet — the browser default is
+// used instead.
 export function pickVoice(lang) {
-  const synth = typeof window !== 'undefined' ? window.speechSynthesis : null
-  if (!synth || typeof synth.getVoices !== 'function') return null
-  const voices = synth.getVoices() || []
+  const voices = availableVoices()
   if (voices.length === 0) return null
   const wanted = (lang || DEFAULT_VOICE_LANG).toLowerCase()
   const family = wanted.split('-')[0]
