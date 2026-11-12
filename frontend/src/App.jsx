@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   deleteConversation,
@@ -33,6 +33,65 @@ export default function App() {
   const [coding, setCoding] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
+
+  // Phase 2.3 (F2): stream chunks arrive per token, and applying
+  // each one as its own setState re-renders the transcript per
+  // token. Collect chunks in a ref and apply them once per animation
+  // frame instead — the bubble still grows live, but at most ~60
+  // state updates a second. flushChunks is safe to call from the
+  // frame callback or synchronously (it cancels any pending frame);
+  // the synchronous call matters when the tab is hidden, where
+  // requestAnimationFrame never fires, and at the end of a stream,
+  // so the final text is never left sitting in the ref.
+  const pendingChunkRef = useRef('')
+  const chunkRafRef = useRef(0)
+
+  const flushChunks = useCallback(() => {
+    if (chunkRafRef.current) {
+      cancelAnimationFrame(chunkRafRef.current)
+      chunkRafRef.current = 0
+    }
+    const text = pendingChunkRef.current
+    if (!text) return
+    pendingChunkRef.current = ''
+    setMessages((prev) => {
+      const last = prev[prev.length - 1]
+      if (last && last.role === 'assistant') {
+        const next = [...prev]
+        next[next.length - 1] = { ...last, content: last.content + text }
+        return next
+      }
+      return [...prev, { role: 'assistant', content: text, trace: [] }]
+    })
+  }, [])
+
+  const queueChunk = useCallback(
+    (chunk) => {
+      pendingChunkRef.current += chunk
+      if (!chunkRafRef.current) {
+        chunkRafRef.current = requestAnimationFrame(flushChunks)
+      }
+    },
+    [flushChunks]
+  )
+
+  // Discard queued chunks without applying them. Used when the
+  // stream failed before the server saved anything: a frame still
+  // pending when the error lands must not resurrect the partial
+  // bubble the error path just dropped — the transcript must never
+  // show a reply the server did not save.
+  const discardChunks = useCallback(() => {
+    if (chunkRafRef.current) {
+      cancelAnimationFrame(chunkRafRef.current)
+      chunkRafRef.current = 0
+    }
+    pendingChunkRef.current = ''
+  }, [])
+
+  useEffect(
+    () => () => cancelAnimationFrame(chunkRafRef.current),
+    []
+  )
 
   // A 401 from any data call means the Django session expired (or
   // was logged out elsewhere): drop back to the login screen instead
@@ -156,20 +215,12 @@ export default function App() {
         // the first chunk and grows as the reply streams in. Agent
         // and coding modes keep the atomic /api/chat/ path below,
         // because their step traces arrive with the finished reply.
-        const done = await sendChatStream(text, activeId, model, (chunk) => {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1]
-            if (last && last.role === 'assistant') {
-              const next = [...prev]
-              next[next.length - 1] = {
-                ...last,
-                content: last.content + chunk,
-              }
-              return next
-            }
-            return [...prev, { role: 'assistant', content: chunk, trace: [] }]
-          })
-        })
+        const done = await sendChatStream(text, activeId, model, queueChunk)
+        // Phase 2.3: apply any chunk still waiting for its frame
+        // before marking the reply complete — a hidden tab never
+        // fires requestAnimationFrame, so without this the final
+        // words could sit in the ref after the stream ended.
+        flushChunks()
         setActiveId(done.conversation_id)
       } else {
         const data = await sendChat(text, activeId, model, agent, coding, coding)
@@ -181,13 +232,21 @@ export default function App() {
       }
       refreshConversations()
     } catch (err) {
-      if (sessionExpired(err)) return
+      if (sessionExpired(err)) {
+        // The login screen replaces the chat; a pending frame must
+        // not re-add a bubble to the cleared transcript.
+        discardChunks()
+        return
+      }
       if (err.interrupted) {
         // Phase 2.1: the provider died mid-reply and the server
         // saved the partial text flagged incomplete. Keep the bubble
         // and label it — dropping it would hide a message the saved
         // transcript actually contains, and keeping it unlabelled
-        // would fake a finished answer.
+        // would fake a finished answer. Flush first (Phase 2.3) so
+        // the bubble shows the full saved partial, not just what
+        // happened to reach a frame before the failure.
+        flushChunks()
         setMessages((prev) => {
           const last = prev[prev.length - 1]
           if (!last || last.role !== 'assistant') return prev
@@ -206,7 +265,10 @@ export default function App() {
       // Any other stream failure (transport drop, missing done
       // event, pre-stream error): the server saved nothing, so drop
       // the partial bubble — the transcript must never show a reply
-      // the server did not save.
+      // the server did not save. Discard first (Phase 2.3): a frame
+      // still pending when the error landed would otherwise flush
+      // after the drop and resurrect the bubble.
+      discardChunks()
       setMessages((prev) => {
         const last = prev[prev.length - 1]
         return last && last.role === 'assistant' ? prev.slice(0, -1) : prev

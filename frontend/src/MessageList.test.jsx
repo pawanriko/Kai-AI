@@ -1,15 +1,202 @@
 // @vitest-environment jsdom
 //
-// Phase 2.1: an interrupted assistant reply must be visibly labelled
-// in the transcript — both when it arrives live (the `incomplete`
-// flag App.jsx sets on the bubble) and when a saved conversation is
-// reopened (the `status: 'incomplete'` the API returns). Rendered
-// server-side: the label is pure markup, no interaction needed.
+// Phase 2.3: scroll and Thinking-bubble behaviour, tested in the
+// DOM (renderToString cannot observe effects or scrolling).
+//
+// F1: the transcript scrolls instantly and only while the user is
+// already near the bottom — no smooth-scroll animation restarting
+// on every chunk, and no yanking a reader who scrolled up.
+// F3: the Thinking bubble shows only while sending AND no assistant
+// bubble exists yet. That rule lives in App.jsx, which gates the
+// `sending` prop it passes here (sending && last message is not an
+// assistant bubble) — the first chunk creates the assistant bubble,
+// which hides it. MessageList itself renders Thinking whenever its
+// `sending` prop is true; the end-to-end rule is covered by
+// App.test.jsx, which asserts Thinking shows before the first flush
+// and is gone after it. What this level locks in: Thinking appears
+// while sending with no assistant bubble yet.
 
-import { describe, expect, it } from 'vitest'
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
+import { act } from 'react'
+import { createRoot } from 'react-dom/client'
 import { renderToString } from 'react-dom/server'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import MessageList from './components/MessageList'
+
+const roots = []
+let origScrollIntoView
+
+afterEach(() => {
+  act(() => {
+    roots.splice(0).forEach((root) => root.unmount())
+  })
+  document.body.innerHTML = ''
+  if (origScrollIntoView !== undefined) {
+    Element.prototype.scrollIntoView = origScrollIntoView
+    origScrollIntoView = undefined
+  }
+  vi.restoreAllMocks()
+})
+
+function renderList(messages, sending) {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const root = createRoot(container)
+  roots.push(root)
+  const render = (msgs, snd) => {
+    act(() => {
+      root.render(<MessageList messages={msgs} sending={snd} />)
+    })
+  }
+  render(messages, sending)
+  return { container, render }
+}
+
+// jsdom has no layout: scrollHeight/clientHeight read 0. Define
+// them on the element so the near-bottom math has real numbers.
+function setMetrics(el, { scrollHeight, clientHeight, scrollTop }) {
+  Object.defineProperty(el, 'scrollHeight', {
+    value: scrollHeight,
+    configurable: true,
+  })
+  Object.defineProperty(el, 'clientHeight', {
+    value: clientHeight,
+    configurable: true,
+  })
+  el.scrollTop = scrollTop
+}
+
+describe('MessageList scroll (Phase 2.3 F1)', () => {
+  it('scrolls instantly to the bottom when near it', () => {
+    const { container, render } = renderList(
+      [{ id: 1, role: 'user', content: 'hi' }],
+      false
+    )
+    const el = container.querySelector('.messages')
+    setMetrics(el, { scrollHeight: 1000, clientHeight: 500, scrollTop: 500 })
+    // New chunk arrives: content grows, still near the bottom.
+    // The assignment lands on the maximum scroll position
+    // (scrollHeight - clientHeight), not on scrollHeight itself.
+    setMetrics(el, { scrollHeight: 1200, clientHeight: 500, scrollTop: 500 })
+    render(
+      [
+        { id: 1, role: 'user', content: 'hi' },
+        { id: 2, role: 'assistant', content: 'hello' },
+      ],
+      false
+    )
+    expect(el.scrollTop).toBe(700)
+  })
+
+  it('does not scroll when the content fits the container', () => {
+    const { container, render } = renderList(
+      [{ id: 1, role: 'user', content: 'hi' }],
+      false
+    )
+    const el = container.querySelector('.messages')
+    // Short content: scrollHeight < clientHeight, so the maximum
+    // scroll position is 0 — never a negative assignment.
+    setMetrics(el, { scrollHeight: 300, clientHeight: 500, scrollTop: 0 })
+    render(
+      [
+        { id: 1, role: 'user', content: 'hi' },
+        { id: 2, role: 'assistant', content: 'hello' },
+      ],
+      false
+    )
+    expect(el.scrollTop).toBe(0)
+  })
+
+  it('never moves the viewport once the user scrolled up', () => {
+    const { container, render } = renderList(
+      [{ id: 1, role: 'user', content: 'hi' }],
+      false
+    )
+    const el = container.querySelector('.messages')
+    setMetrics(el, { scrollHeight: 1000, clientHeight: 500, scrollTop: 100 })
+    act(() => {
+      el.dispatchEvent(new Event('scroll'))
+    })
+    setMetrics(el, { scrollHeight: 1200, clientHeight: 500, scrollTop: 100 })
+    render(
+      [
+        { id: 1, role: 'user', content: 'hi' },
+        { id: 2, role: 'assistant', content: 'hello' },
+      ],
+      false
+    )
+    expect(el.scrollTop).toBe(100)
+  })
+
+  it('resumes auto-scroll once the user returns to the bottom', () => {
+    const { container, render } = renderList(
+      [{ id: 1, role: 'user', content: 'hi' }],
+      false
+    )
+    const el = container.querySelector('.messages')
+    const two = [
+      { id: 1, role: 'user', content: 'hi' },
+      { id: 2, role: 'assistant', content: 'hello' },
+    ]
+    const three = [
+      ...two,
+      { id: 3, role: 'assistant', content: 'hello again' },
+    ]
+    // User scrolls up: the next chunk must not move the viewport.
+    setMetrics(el, { scrollHeight: 1000, clientHeight: 500, scrollTop: 100 })
+    act(() => {
+      el.dispatchEvent(new Event('scroll'))
+    })
+    setMetrics(el, { scrollHeight: 1200, clientHeight: 500, scrollTop: 100 })
+    render(two, false)
+    expect(el.scrollTop).toBe(100)
+    // User scrolls back to the bottom: the next chunk resumes
+    // auto-scroll instantly, to the maximum scroll position.
+    setMetrics(el, { scrollHeight: 1200, clientHeight: 500, scrollTop: 700 })
+    act(() => {
+      el.dispatchEvent(new Event('scroll'))
+    })
+    setMetrics(el, { scrollHeight: 1400, clientHeight: 500, scrollTop: 700 })
+    render(three, false)
+    expect(el.scrollTop).toBe(900)
+  })
+
+  it('never calls scrollIntoView (no smooth animation to restart)', () => {
+    origScrollIntoView = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = vi.fn()
+    const { render } = renderList(
+      [{ id: 1, role: 'user', content: 'hi' }],
+      true
+    )
+    render(
+      [
+        { id: 1, role: 'user', content: 'hi' },
+        { id: 2, role: 'assistant', content: 'hello' },
+      ],
+      true
+    )
+    render(
+      [
+        { id: 1, role: 'user', content: 'hi' },
+        { id: 2, role: 'assistant', content: 'hello world' },
+      ],
+      true
+    )
+    expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled()
+  })
+})
+
+describe('MessageList Thinking bubble (Phase 2.3 F3)', () => {
+  it('shows Thinking while sending with no assistant bubble yet', () => {
+    const { container } = renderList(
+      [{ id: 1, role: 'user', content: 'hi' }],
+      true
+    )
+    expect(container.textContent).toContain('Thinking')
+  })
+})
 
 describe('MessageList interrupted label', () => {
   it('labels a saved incomplete reply as interrupted', () => {
