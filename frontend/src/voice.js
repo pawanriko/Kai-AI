@@ -104,19 +104,77 @@ export function voiceErrorMessage(code) {
 }
 
 // Speak text aloud, interrupting anything currently playing.
-// onDone fires when the utterance ends or errors. Returns false
+// onDone fires when the LAST chunk ends or errors. Returns false
 // when speaking is impossible (unsupported or empty text).
+//
+// Humanizing, within what the browser allows: speechSynthesis can
+// only use the voices installed on the device, so the quality
+// ceiling is the OS/browser voice list — KAI cannot conjure a
+// human voice from nothing. What it CAN do is pick the best voice
+// available (natural/neural voices over the flat default), tune
+// the delivery slightly slower than default, and speak sentence
+// by sentence so the pauses land like natural phrasing instead of
+// one flat run-on. A truly human voice would need a cloud TTS
+// service (API key + cost) — deliberately not added here.
 export function speak(text, { lang, onDone } = {}) {
   if (!speechSynthesisSupported()) return false
   const trimmed = (text || '').trim()
   if (!trimmed) return false
+  const chunks = splitSentences(trimmed)
+  const voice = pickVoice(lang || DEFAULT_VOICE_LANG)
   window.speechSynthesis.cancel()
-  const utterance = new window.SpeechSynthesisUtterance(trimmed)
-  utterance.lang = lang || DEFAULT_VOICE_LANG
-  utterance.onend = () => onDone?.()
-  utterance.onerror = () => onDone?.()
-  window.speechSynthesis.speak(utterance)
+  let pending = chunks.length
+  const finishOne = () => {
+    pending -= 1
+    if (pending <= 0) onDone?.()
+  }
+  for (const chunk of chunks) {
+    const utterance = new window.SpeechSynthesisUtterance(chunk)
+    utterance.lang = lang || DEFAULT_VOICE_LANG
+    utterance.rate = 0.95
+    utterance.pitch = 1.0
+    if (voice) utterance.voice = voice
+    utterance.onend = finishOne
+    utterance.onerror = finishOne
+    window.speechSynthesis.speak(utterance)
+  }
   return true
+}
+
+// Split reply text into speakable sentences. Delimiters stay
+// attached (the pause lives in the punctuation), blank runs drop
+// out, and text with no sentence punctuation stays one chunk.
+export function splitSentences(text) {
+  const parts = text.match(/[^.!?\n]+[.!?\n]+|[^.!?\n]+$/g) || []
+  return parts.map((p) => p.trim()).filter(Boolean)
+}
+
+// Pick the most human-sounding voice for a language from the
+// voices the browser reports. Preference order: exact-language
+// natural/neural voices first (Google/Microsoft natural voices,
+// named human voices), then any exact-language voice, then any
+// voice in the same language family. Returns null when no voices
+// are reported (Chrome loads them asynchronously — the browser
+// default is used instead) or the list has no match.
+export function pickVoice(lang) {
+  const synth = typeof window !== 'undefined' ? window.speechSynthesis : null
+  if (!synth || typeof synth.getVoices !== 'function') return null
+  const voices = synth.getVoices() || []
+  if (voices.length === 0) return null
+  const wanted = (lang || DEFAULT_VOICE_LANG).toLowerCase()
+  const family = wanted.split('-')[0]
+  const natural = /natural|neural|google|samantha|heera|ravi|aarav|neerja|zira|david|mark/i
+  const exact = voices.filter((v) => (v.lang || '').toLowerCase() === wanted)
+  const exactNatural = exact.filter((v) => natural.test(v.name || ''))
+  if (exactNatural.length > 0) return exactNatural[0]
+  if (exact.length > 0) return exact[0]
+  const familyVoices = voices.filter(
+    (v) => (v.lang || '').toLowerCase().split('-')[0] === family
+  )
+  const familyNatural = familyVoices.filter((v) => natural.test(v.name || ''))
+  if (familyNatural.length > 0) return familyNatural[0]
+  if (familyVoices.length > 0) return familyVoices[0]
+  return null
 }
 
 export function stopSpeaking() {

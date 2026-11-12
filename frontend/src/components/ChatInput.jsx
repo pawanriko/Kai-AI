@@ -8,6 +8,13 @@ import {
   speechSynthesisSupported,
   voiceErrorMessage,
 } from '../voice'
+import {
+  AgentIcon,
+  CodeIcon,
+  MicIcon,
+  PlanIcon,
+  StopIcon,
+} from './icons'
 
 // Bottom bar: provider-grouped model picker, Agent mode toggle,
 // message box, Send. Enter sends, Shift+Enter makes a new line.
@@ -100,6 +107,15 @@ export default function ChatInput({
     onVoiceLang(code)
   }
 
+  // Icon-only language toggle: one tap cycles English ⇄ Hindi.
+  // The glyph itself says which language is active — "A" for
+  // English, "अ" for Hindi — with the full name in the tooltip.
+  function toggleVoiceLang() {
+    const current = VOICE_LANGUAGES.findIndex((l) => l.code === voiceLang)
+    const next = VOICE_LANGUAGES[(current + 1) % VOICE_LANGUAGES.length]
+    changeVoiceLang(next.code)
+  }
+
   function submit() {
     const value = text.trim()
     if (!value || sending || submittingRef.current) return
@@ -135,30 +151,39 @@ export default function ChatInput({
           </optgroup>
         ))}
       </select>
+      {/* Icon-only mode toggles: the icon + active glow is the
+          whole control — no ON/OFF text. aria-labels carry the
+          meaning for tests and assistive tech. */}
       <button
-        className={agent ? 'agent-toggle active' : 'agent-toggle'}
+        className={agent ? 'agent-toggle icon-btn active' : 'agent-toggle icon-btn'}
         onClick={() => onAgent(!agent)}
+        aria-label="Agent mode"
+        aria-pressed={agent}
         title="Agent mode: KAI can use tools (calculator, weather, date/time)"
       >
-        Agent {agent ? 'ON' : 'OFF'}
+        <AgentIcon />
       </button>
       <button
-        className={coding ? 'agent-toggle active' : 'agent-toggle'}
+        className={coding ? 'agent-toggle icon-btn active' : 'agent-toggle icon-btn'}
         onClick={() => onCoding(!coding)}
+        aria-label="Coding mode"
+        aria-pressed={coding}
         title="Coding mode: KAI can read/write code and run tests in the sandbox workspace"
       >
-        Code {coding ? 'ON' : 'OFF'}
+        <CodeIcon />
       </button>
       {/* Phase 6: plan-then-execute + tool bundles only make sense
           with tools on, so they appear with Agent mode. */}
       {agent && (
         <>
           <button
-            className={planFirst ? 'agent-toggle active' : 'agent-toggle'}
+            className={planFirst ? 'agent-toggle icon-btn active' : 'agent-toggle icon-btn'}
             onClick={() => onPlanFirst(!planFirst)}
+            aria-label="Plan first"
+            aria-pressed={planFirst}
             title="Plan first: KAI shows its plan before running any tools"
           >
-            Plan {planFirst ? 'ON' : 'OFF'}
+            <PlanIcon />
           </button>
           <select
             className="bundle-picker"
@@ -197,30 +222,31 @@ export default function ChatInput({
       </button>
       {sttSupported && (
         <button
-          className={listening ? 'mic-btn listening' : 'mic-btn'}
+          className={listening ? 'mic-btn icon-btn listening' : 'mic-btn icon-btn'}
           onClick={toggleListening}
+          aria-label={listening ? 'Stop listening' : 'Speak'}
+          aria-pressed={listening}
           title={
             listening
               ? 'Stop listening'
               : 'Speak: dictate your message (push to talk)'
           }
         >
-          {listening ? '⏹ Stop' : '🎤 Speak'}
+          {listening ? <StopIcon /> : <MicIcon />}
         </button>
       )}
       {voiceSupported && (
-        <select
-          className="voice-lang-picker"
-          value={voiceLang}
-          onChange={(e) => changeVoiceLang(e.target.value)}
-          title="Voice language (speech input and read-aloud)"
+        <button
+          className="lang-btn icon-btn"
+          onClick={toggleVoiceLang}
+          aria-label="Voice language"
+          title={`Voice language: ${
+            VOICE_LANGUAGES.find((l) => l.code === voiceLang)?.label ||
+            voiceLang
+          } — click to switch`}
         >
-          {VOICE_LANGUAGES.map((l) => (
-            <option key={l.code} value={l.code}>
-              {l.label}
-            </option>
-          ))}
-        </select>
+          <span aria-hidden="true">{voiceLang.startsWith('hi') ? 'अ' : 'A'}</span>
+        </button>
       )}
       {(interim || voiceError) && (
         <span className="voice-hint">

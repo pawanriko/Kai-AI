@@ -297,7 +297,7 @@ describe('MessageList read-aloud (Phase 7 Stage A)', () => {
     expect(utterances[0].text).toBe('Hello there')
     expect(utterances[0].lang).toBe('hi-IN')
     expect(window.speechSynthesis.speak).toHaveBeenCalledTimes(1)
-    expect(button.textContent).toContain('Stop')
+    expect(button.getAttribute('aria-label')).toBe('Stop reading aloud')
   })
 
   it('stops on a second click and clears state when speech ends', () => {
@@ -312,7 +312,7 @@ describe('MessageList read-aloud (Phase 7 Stage A)', () => {
       button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     expect(window.speechSynthesis.cancel).toHaveBeenCalled()
-    expect(button.textContent).toContain('Read aloud')
+    expect(button.getAttribute('aria-label')).toBe('Read aloud')
   })
 
   it('offers no read-aloud on user messages', () => {

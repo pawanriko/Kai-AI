@@ -57,6 +57,7 @@ afterEach(() => {
   document.body.innerHTML = ''
   window.requestAnimationFrame = origRaf
   window.cancelAnimationFrame = origCancelRaf
+  window.localStorage.clear()
   vi.clearAllMocks()
 })
 
@@ -271,10 +272,19 @@ describe('App plan-then-execute flow (Phase 6)', () => {
     return button
   }
 
+  // Icon-only toggles carry no text — find them by aria-label.
+  function clickIconButton(container, label) {
+    const button = container.querySelector(`[aria-label="${label}"]`)
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    return button
+  }
+
   async function enablePlanFirst(container) {
-    clickButton(container, 'Agent OFF')
+    clickIconButton(container, 'Agent mode')
     await act(async () => {})
-    clickButton(container, 'Plan OFF')
+    clickIconButton(container, 'Plan first')
     await act(async () => {})
   }
 
@@ -357,7 +367,7 @@ describe('App plan-then-execute flow (Phase 6)', () => {
       trace: [],
     })
     const container = await renderApp()
-    clickButton(container, 'Agent OFF')
+    clickIconButton(container, 'Agent mode')
     await act(async () => {})
     const picker = container.querySelector('.bundle-picker')
     act(() => {
@@ -379,5 +389,123 @@ describe('App plan-then-execute flow (Phase 6)', () => {
       false,
       { bundle: 'research' }
     )
+  })
+})
+
+describe('App paced reveal (smooth output)', () => {
+  function lastBubbleText(container) {
+    const bubbles = container.querySelectorAll('.bubble-text')
+    return bubbles[bubbles.length - 1]?.textContent || ''
+  }
+
+  it('reveals a burst gradually across frames instead of dumping it', async () => {
+    let release
+    const streamOpen = new Promise((resolve) => {
+      release = resolve
+    })
+    const burst = 'word '.repeat(40) // 200 characters, one burst
+    sendChatStream.mockImplementation(async (_msg, _id, _model, onChunk) => {
+      onChunk(burst)
+      await streamOpen
+      return { conversation_id: 7 }
+    })
+
+    const container = await renderApp()
+    typeText(container.querySelector('.composer-input'), 'hi')
+    act(() => {
+      container
+        .querySelector('.send-btn')
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {})
+    await act(async () => {})
+
+    expect(rafQueue.length).toBe(1)
+    // One frame: only the paced slice is visible (cap = 34 for a
+    // 200-char backlog), not the whole burst.
+    act(() => {
+      rafQueue.splice(0).forEach(({ cb }) => cb())
+    })
+    expect(lastBubbleText(container).length).toBe(34)
+    expect(lastBubbleText(container)).not.toBe(burst)
+
+    // Drain the remaining frames: the full burst arrives.
+    for (let i = 0; i < 20 && rafQueue.length > 0; i++) {
+      act(() => {
+        rafQueue.splice(0).forEach(({ cb }) => cb())
+      })
+    }
+    expect(lastBubbleText(container)).toBe(burst)
+
+    await act(async () => {
+      release()
+    })
+    await act(async () => {})
+    expect(lastBubbleText(container)).toBe(burst)
+    expect(container.querySelector('.send-btn').disabled).toBe(false)
+  })
+
+  it('flushes the whole backlog instantly when the stream ends', async () => {
+    // The synchronous flush in handleSend bypasses the pace cap:
+    // a stream that ends mid-burst must not leave text waiting
+    // for frames that may never fire (hidden tab).
+    const burst = 'word '.repeat(40)
+    sendChatStream.mockImplementation(async (_msg, _id, _model, onChunk) => {
+      onChunk(burst)
+      return { conversation_id: 7 }
+    })
+
+    const container = await renderApp()
+    typeText(container.querySelector('.composer-input'), 'hi')
+    act(() => {
+      container
+        .querySelector('.send-btn')
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {})
+    await act(async () => {})
+
+    // No frames fired, yet the full reply is on screen.
+    expect(lastBubbleText(container)).toBe(burst)
+    expect(rafQueue.length).toBe(0)
+  })
+})
+
+describe('App sidebar collapse', () => {
+  it('slides the sessions panel away and back, and remembers the choice', async () => {
+    const container = await renderApp()
+    const layout = () => container.querySelector('.layout')
+    expect(layout().classList.contains('sidebar-collapsed')).toBe(false)
+    expect(
+      container.querySelector('[aria-label="Open sessions panel"]')
+    ).toBeNull()
+
+    act(() => {
+      container
+        .querySelector('[aria-label="Close sessions panel"]')
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(layout().classList.contains('sidebar-collapsed')).toBe(true)
+    expect(window.localStorage.getItem('kai-sidebar-open')).toBe('false')
+
+    const expand = container.querySelector(
+      '[aria-label="Open sessions panel"]'
+    )
+    expect(expand).toBeTruthy()
+    act(() => {
+      expand.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(layout().classList.contains('sidebar-collapsed')).toBe(false)
+    expect(window.localStorage.getItem('kai-sidebar-open')).toBe('true')
+  })
+
+  it('starts collapsed when the stored choice says so', async () => {
+    window.localStorage.setItem('kai-sidebar-open', 'false')
+    const container = await renderApp()
+    expect(
+      container
+        .querySelector('.layout')
+        .classList.contains('sidebar-collapsed')
+    ).toBe(true)
   })
 })

@@ -6,6 +6,7 @@ import {
   speechSynthesisSupported,
   stopSpeaking,
 } from '../voice'
+import { SpeakerIcon, StopIcon } from './icons'
 
 // The scrolling transcript. Messages are plain text for now (line
 // breaks preserved via CSS white-space); rich markdown rendering is a
@@ -43,11 +44,12 @@ function MessageBubble({ message: m, bubbleKey, speaking, onSpeak }) {
           taking the bubble key, so React.memo keeps working. */}
       {m.role === 'assistant' && speechSynthesisSupported() && (
         <button
-          className="speak-btn"
+          className="speak-btn icon-btn"
           onClick={() => onSpeak(bubbleKey, m.content)}
+          aria-label={speaking ? 'Stop reading aloud' : 'Read aloud'}
           title={speaking ? 'Stop reading aloud' : 'Read aloud'}
         >
-          {speaking ? '⏹ Stop' : '🔊 Read aloud'}
+          {speaking ? <StopIcon /> : <SpeakerIcon />}
         </button>
       )}
       {m.trace && m.trace.length > 0 && (

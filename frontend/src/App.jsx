@@ -13,6 +13,7 @@ import {
   sendChatStream,
 } from './api'
 import ChatInput from './components/ChatInput'
+import { ChevronRightIcon } from './components/icons'
 import Login from './components/Login'
 import MemoryPanel from './components/MemoryPanel'
 import MessageList from './components/MessageList'
@@ -47,27 +48,47 @@ export default function App() {
   const [voiceLang, setVoiceLang] = useState('en-IN')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
+  // Sessions panel: collapsible — the chevron slides the sidebar
+  // away so the chat takes the full width. The choice persists in
+  // localStorage; a missing or blocked store just means "open".
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try {
+      return window.localStorage.getItem('kai-sidebar-open') !== 'false'
+    } catch {
+      return true
+    }
+  })
 
-  // Phase 2.3 (F2): stream chunks arrive per token, and applying
-  // each one as its own setState re-renders the transcript per
-  // token. Collect chunks in a ref and apply them once per animation
-  // frame instead — the bubble still grows live, but at most ~60
-  // state updates a second. flushChunks is safe to call from the
-  // frame callback or synchronously (it cancels any pending frame);
-  // the synchronous call matters when the tab is hidden, where
-  // requestAnimationFrame never fires, and at the end of a stream,
-  // so the final text is never left sitting in the ref.
+  function toggleSidebar(open) {
+    setSidebarOpen(open)
+    try {
+      window.localStorage.setItem('kai-sidebar-open', String(open))
+    } catch {
+      // Private mode etc. — the panel still toggles this session.
+    }
+  }
+
+  // Phase 2.3 (F2) + paced reveal: stream chunks arrive per token,
+  // and applying each one as its own setState re-renders the
+  // transcript per token. Collect chunks in a ref and apply them
+  // once per animation frame instead. But frames alone do not make
+  // output LOOK smooth: free providers send tokens in bursts
+  // (nothing for 300ms, then 200 characters at once), so a frame
+  // that dumps its whole backlog still jumps. Each frame therefore
+  // reveals only a paced slice — at least 30 characters, or a sixth
+  // of the backlog when it is large — and re-schedules while text
+  // remains. Small backlogs (the common case) still land in one
+  // frame with no added latency; bursts drain over ~6 frames
+  // (~100ms) as a steady flow instead of a jump. flushChunks
+  // bypasses the cap: at stream end (or on interrupt) every
+  // remaining character lands immediately, so the final text is
+  // never left sitting in the ref — including when the tab is
+  // hidden, where requestAnimationFrame never fires.
   const pendingChunkRef = useRef('')
   const chunkRafRef = useRef(0)
 
-  const flushChunks = useCallback(() => {
-    if (chunkRafRef.current) {
-      cancelAnimationFrame(chunkRafRef.current)
-      chunkRafRef.current = 0
-    }
-    const text = pendingChunkRef.current
+  const appendToAssistant = useCallback((text) => {
     if (!text) return
-    pendingChunkRef.current = ''
     setMessages((prev) => {
       const last = prev[prev.length - 1]
       if (last && last.role === 'assistant') {
@@ -79,14 +100,36 @@ export default function App() {
     })
   }, [])
 
+  const revealStep = useCallback(() => {
+    chunkRafRef.current = 0
+    const pending = pendingChunkRef.current
+    if (!pending) return
+    const cap = Math.max(30, Math.ceil(pending.length / 6))
+    pendingChunkRef.current = pending.slice(cap)
+    appendToAssistant(pending.slice(0, cap))
+    if (pendingChunkRef.current) {
+      chunkRafRef.current = requestAnimationFrame(revealStep)
+    }
+  }, [appendToAssistant])
+
+  const flushChunks = useCallback(() => {
+    if (chunkRafRef.current) {
+      cancelAnimationFrame(chunkRafRef.current)
+      chunkRafRef.current = 0
+    }
+    const text = pendingChunkRef.current
+    pendingChunkRef.current = ''
+    appendToAssistant(text)
+  }, [appendToAssistant])
+
   const queueChunk = useCallback(
     (chunk) => {
       pendingChunkRef.current += chunk
       if (!chunkRafRef.current) {
-        chunkRafRef.current = requestAnimationFrame(flushChunks)
+        chunkRafRef.current = requestAnimationFrame(revealStep)
       }
     },
-    [flushChunks]
+    [revealStep]
   )
 
   // Discard queued chunks without applying them. Used when the
@@ -389,7 +432,7 @@ export default function App() {
   }
 
   return (
-    <div className="layout">
+    <div className={sidebarOpen ? 'layout' : 'layout sidebar-collapsed'}>
       <Sidebar
         conversations={conversations}
         activeId={activeId}
@@ -400,8 +443,19 @@ export default function App() {
         onView={setView}
         username={auth.username}
         onLogout={handleLogout}
+        onCollapse={() => toggleSidebar(false)}
       />
       <main className="main">
+        {!sidebarOpen && (
+          <button
+            className="expand-btn icon-btn"
+            onClick={() => toggleSidebar(true)}
+            aria-label="Open sessions panel"
+            title="Open sessions panel"
+          >
+            <ChevronRightIcon />
+          </button>
+        )}
         {view === 'memory' ? (
           <MemoryPanel />
         ) : view === 'usage' ? (

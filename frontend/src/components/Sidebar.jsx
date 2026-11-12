@@ -1,6 +1,10 @@
 // Left column: brand, view switch (Chat / Memory), New chat button,
 // and the conversation history list. Pure presentation — all state
-// lives in App and arrives via props.
+// lives in App and arrives via props. The collapse chevron slides
+// the whole column away (App owns the open state); the expand
+// button lives in App, since the sidebar is off-canvas when shut.
+import { ChevronLeftIcon } from './icons'
+
 export default function Sidebar({
   conversations,
   activeId,
@@ -11,11 +15,24 @@ export default function Sidebar({
   onView,
   username,
   onLogout,
+  onCollapse,
 }) {
   return (
     <aside className="sidebar">
-      <div className="brand">KAI</div>
-      <div className="brand-sub">PERSONAL AI — V2</div>
+      <div className="brand-row">
+        <div>
+          <div className="brand">KAI</div>
+          <div className="brand-sub">PERSONAL AI — V2</div>
+        </div>
+        <button
+          className="collapse-btn icon-btn"
+          onClick={onCollapse}
+          aria-label="Close sessions panel"
+          title="Close sessions panel"
+        >
+          <ChevronLeftIcon />
+        </button>
+      </div>
 
       <nav className="side-nav">
         <button

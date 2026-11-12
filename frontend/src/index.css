@@ -783,6 +783,179 @@ summary:focus-visible {
   }
 }
 
+/* ---------- Glass surfaces, icon controls, sliding sidebar ----------
+   Glassmorphism pass: translucent panels over a faint background
+   glow, backdrop blur, hairline light borders, soft shadows, and
+   small radii on glass surfaces only — the editorial headings and
+   black/white language stay. Icon-only controls are transparent
+   glass squares; the active state is a glow, not a text label.
+   The sidebar slides away on a 280ms margin transition (the one
+   deliberate exception to the 120ms micro-transition rule — see
+   polish.test.js). Reduced-motion still kills all of it. */
+
+:root {
+  --glass-bg: rgba(255, 255, 255, 0.04);
+  --glass-bg-strong: rgba(16, 16, 16, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-blur: blur(14px) saturate(140%);
+  --glass-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+}
+
+body {
+  background:
+    radial-gradient(
+      700px 400px at 15% -10%,
+      rgba(255, 255, 255, 0.05),
+      transparent 60%
+    ),
+    radial-gradient(
+      600px 380px at 105% 110%,
+      rgba(255, 255, 255, 0.04),
+      transparent 60%
+    ),
+    var(--bg);
+}
+
+.layout {
+  overflow: hidden;
+}
+
+/* Glass: sidebar, composer, bubbles, cards. */
+.sidebar {
+  background: var(--glass-bg-strong);
+  border-right-color: var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  transition: margin-left 280ms ease;
+}
+
+.composer {
+  background: var(--glass-bg-strong);
+  border-top-color: var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+.bubble {
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+  border-radius: 14px;
+  box-shadow: var(--glass-shadow);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+.bubble-row.user .bubble {
+  background: rgba(245, 245, 245, 0.92);
+}
+
+.plan-review,
+.memory-item {
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+  border-radius: 12px;
+  box-shadow: var(--glass-shadow);
+}
+
+.login-box {
+  background: rgba(18, 21, 28, 0.6);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+.model-picker,
+.bundle-picker {
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+  border-radius: 10px;
+}
+
+/* Icon-only controls: transparent glass squares. The icon and the
+   active glow carry the meaning — no text labels. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease,
+    border-color 120ms ease, box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.icon-btn:hover {
+  color: var(--text);
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+}
+
+.icon-btn.active {
+  color: var(--text);
+  background: var(--glass-bg);
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 4px 18px rgba(255, 255, 255, 0.08);
+}
+
+.icon-btn:active {
+  transform: translateY(1px);
+}
+
+.icon-btn svg {
+  display: block;
+}
+
+.lang-btn span {
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Sidebar slide: the collapse chevron sits beside the brand; the
+   expand chevron floats over the main area while shut. */
+.brand-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.collapse-btn {
+  margin-top: 0.1rem;
+}
+
+.layout.sidebar-collapsed .sidebar {
+  margin-left: -280px;
+}
+
+.main {
+  position: relative;
+}
+
+.expand-btn {
+  position: absolute;
+  top: 0.9rem;
+  left: 0.9rem;
+  z-index: 5;
+  background: var(--glass-bg-strong);
+  border-color: var(--glass-border);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+@media (max-width: 720px) {
+  .layout.sidebar-collapsed .sidebar {
+    margin-left: -210px;
+  }
+}
+
 /* Reduced motion: no animation, no transition — content appears
    in its final state immediately. */
 @media (prefers-reduced-motion: reduce) {

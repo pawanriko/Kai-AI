@@ -127,27 +127,21 @@ describe('ChatInput plan + bundle controls (Phase 6)', () => {
     const agentOn = renderAgentInput({ agent: true })
     expect(agentOn.querySelector('.bundle-picker')).toBeTruthy()
     expect(
-      [...agentOn.querySelectorAll('button')].some((b) =>
-        b.textContent.startsWith('Plan')
-      )
-    ).toBe(true)
+      agentOn.querySelector('[aria-label="Plan first"]')
+    ).toBeTruthy()
 
     const agentOff = renderAgentInput({ agent: false })
     expect(agentOff.querySelector('.bundle-picker')).toBeNull()
     expect(
-      [...agentOff.querySelectorAll('button')].some((b) =>
-        b.textContent.startsWith('Plan')
-      )
-    ).toBe(false)
+      agentOff.querySelector('[aria-label="Plan first"]')
+    ).toBeNull()
   })
 
   it('toggles plan-first and picks a bundle', () => {
     const onPlanFirst = vi.fn()
     const onBundle = vi.fn()
     const container = renderAgentInput({ onPlanFirst, onBundle })
-    const planButton = [...container.querySelectorAll('button')].find(
-      (b) => b.textContent === 'Plan OFF'
-    )
+    const planButton = container.querySelector('[aria-label="Plan first"]')
     act(() => {
       planButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
@@ -302,11 +296,12 @@ describe('ChatInput voice controls (Phase 7 Stage A)', () => {
     return container.querySelector('.mic-btn')
   }
 
-  it('shows the mic button and language picker when supported', () => {
+  it('shows the mic button and language toggle when supported', () => {
     const container = renderVoiceInput()
     expect(micButton(container)).toBeTruthy()
-    expect(micButton(container).textContent).toContain('Speak')
-    expect(container.querySelector('.voice-lang-picker')).toBeTruthy()
+    expect(micButton(container).getAttribute('aria-label')).toBe('Speak')
+    expect(container.querySelector('.lang-btn')).toBeTruthy()
+    expect(container.querySelector('.lang-btn').textContent).toBe('A')
   })
 
   it('starts listening on click and appends final transcripts', () => {
@@ -319,7 +314,10 @@ describe('ChatInput voice controls (Phase 7 Stage A)', () => {
     const recognition = FakeRecognition.instances[0]
     expect(recognition.start).toHaveBeenCalledTimes(1)
     expect(recognition.lang).toBe('en-IN')
-    expect(micButton(container).textContent).toContain('Stop')
+    expect(micButton(container).getAttribute('aria-label')).toBe(
+      'Stop listening'
+    )
+    expect(micButton(container).classList.contains('listening')).toBe(true)
     act(() => {
       recognition.fireResult('hello kai', true)
     })
@@ -327,7 +325,7 @@ describe('ChatInput voice controls (Phase 7 Stage A)', () => {
     act(() => {
       recognition.fireEnd()
     })
-    expect(micButton(container).textContent).toContain('Speak')
+    expect(micButton(container).getAttribute('aria-label')).toBe('Speak')
   })
 
   it('shows interim previews and friendly errors without touching the box', () => {
@@ -365,25 +363,30 @@ describe('ChatInput voice controls (Phase 7 Stage A)', () => {
     expect(recognition.stop).toHaveBeenCalledTimes(1)
   })
 
-  it('changes the voice language through the picker', () => {
+  it('cycles the voice language through the icon toggle', () => {
     const onVoiceLang = vi.fn()
     const container = renderVoiceInput({ onVoiceLang })
-    const picker = container.querySelector('.voice-lang-picker')
     act(() => {
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLSelectElement.prototype,
-        'value'
-      ).set
-      setter.call(picker, 'hi-IN')
-      picker.dispatchEvent(new Event('change', { bubbles: true }))
+      container
+        .querySelector('.lang-btn')
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
     expect(onVoiceLang).toHaveBeenCalledWith('hi-IN')
+
+    const hindi = renderVoiceInput({ voiceLang: 'hi-IN', onVoiceLang })
+    expect(hindi.querySelector('.lang-btn').textContent).toBe('अ')
+    act(() => {
+      hindi
+        .querySelector('.lang-btn')
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onVoiceLang).toHaveBeenCalledWith('en-IN')
   })
 
   it('hides voice controls when the browser has no speech APIs', () => {
     delete window.SpeechRecognition
     const container = renderVoiceInput()
     expect(micButton(container)).toBeNull()
-    expect(container.querySelector('.voice-lang-picker')).toBeNull()
+    expect(container.querySelector('.lang-btn')).toBeNull()
   })
 })

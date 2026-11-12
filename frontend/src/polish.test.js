@@ -33,16 +33,18 @@ describe('polish stylesheet', () => {
     expect(css).toContain('transition-duration: 0.01ms')
   })
 
-  it('styles every control class from Phases 5–7', () => {
+  it('styles every control class from Phases 5–7 and the icon controls', () => {
     for (const selector of [
       '.bundle-picker',
-      '.voice-lang-picker',
+      '.lang-btn',
       '.mic-btn',
       '.mic-btn.listening',
       '.speak-btn',
       '.voice-hint',
       '.plan-review',
       '.report-row',
+      '.icon-btn',
+      '.expand-btn',
     ]) {
       expect(css, `missing styles for ${selector}`).toContain(selector)
     }
@@ -60,11 +62,24 @@ describe('polish stylesheet', () => {
   })
 
   it('keeps transitions subtle and consistent', () => {
-    // Every transition in the polish uses the same 120ms ease.
+    // Micro-transitions use one 120ms ease. The single exception
+    // is the sidebar slide (280ms) — a layout motion that must
+    // read as a slide, not a flicker.
     const transitions = [...css.matchAll(/transition:[^;]+;/g)].map((m) => m[0])
     expect(transitions.length).toBeGreaterThan(0)
     for (const rule of transitions) {
-      expect(rule).toContain('120ms')
+      expect(rule).toMatch(/120ms|280ms/)
     }
+    expect(
+      transitions.some((rule) => rule.includes('280ms')),
+      'sidebar slide transition missing'
+    ).toBe(true)
+  })
+
+  it('uses glass surfaces and a sliding sidebar', () => {
+    expect(css).toContain('--glass-bg')
+    expect(css).toContain('backdrop-filter')
+    expect(css).toContain('.layout.sidebar-collapsed .sidebar')
+    expect(css).toContain('margin-left: -280px')
   })
 })

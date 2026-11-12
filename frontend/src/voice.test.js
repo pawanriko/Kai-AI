@@ -9,9 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createRecognizer,
+  pickVoice,
   speak,
   speechRecognitionSupported,
   speechSynthesisSupported,
+  splitSentences,
   stopSpeaking,
   voiceErrorMessage,
 } from './voice'
@@ -136,5 +138,75 @@ describe('voice helpers', () => {
     expect(window.speechSynthesis.speak).not.toHaveBeenCalled()
     stopSpeaking()
     expect(window.speechSynthesis.cancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('picks the most natural exact-language voice, then falls back', () => {
+    const flat = { name: 'Default Voice', lang: 'en-IN' }
+    const natural = { name: 'Google US English', lang: 'en-IN' }
+    const hindi = { name: 'Microsoft Heera - Hindi (India)', lang: 'hi-IN' }
+    window.speechSynthesis = {
+      getVoices: () => [flat, natural, hindi],
+    }
+    expect(pickVoice('en-IN')).toBe(natural)
+    expect(pickVoice('hi-IN')).toBe(hindi)
+    // No exact match: same family, then nothing.
+    expect(pickVoice('en-US')).toBe(natural)
+    expect(pickVoice('fr-FR')).toBeNull()
+    window.speechSynthesis = { getVoices: () => [] }
+    expect(pickVoice('en-IN')).toBeNull()
+    window.speechSynthesis = {}
+    expect(pickVoice('en-IN')).toBeNull()
+  })
+
+  it('splits replies into sentences and tunes delivery', () => {
+    const utterances = []
+    const natural = { name: 'Google हिन्दी', lang: 'hi-IN' }
+    window.speechSynthesis = {
+      speak: vi.fn(),
+      cancel: vi.fn(),
+      getVoices: () => [natural],
+    }
+    window.SpeechSynthesisUtterance = class {
+      constructor(text) {
+        this.text = text
+        utterances.push(this)
+      }
+    }
+    const onDone = vi.fn()
+    expect(
+      speak('First sentence. Second one! And a third?', {
+        lang: 'hi-IN',
+        onDone,
+      })
+    ).toBe(true)
+    expect(utterances.map((u) => u.text)).toEqual([
+      'First sentence.',
+      'Second one!',
+      'And a third?',
+    ])
+    for (const u of utterances) {
+      expect(u.lang).toBe('hi-IN')
+      expect(u.voice).toBe(natural)
+      expect(u.rate).toBe(0.95)
+      expect(u.pitch).toBe(1.0)
+    }
+    expect(window.speechSynthesis.speak).toHaveBeenCalledTimes(3)
+    // onDone fires only after the LAST chunk ends.
+    utterances[0].onend()
+    expect(onDone).not.toHaveBeenCalled()
+    utterances[1].onend()
+    expect(onDone).not.toHaveBeenCalled()
+    utterances[2].onend()
+    expect(onDone).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps unpunctuated text as one chunk', () => {
+    expect(splitSentences('Hello Kai')).toEqual(['Hello Kai'])
+    expect(splitSentences('One. Two.\nThree!')).toEqual([
+      'One.',
+      'Two.',
+      'Three!',
+    ])
+    expect(splitSentences('   ')).toEqual([])
   })
 })
