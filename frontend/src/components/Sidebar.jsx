@@ -36,6 +36,12 @@ export default function Sidebar({
         >
           Usage
         </button>
+        <button
+          className={view === 'automation' ? 'nav-btn active' : 'nav-btn'}
+          onClick={() => onView('automation')}
+        >
+          Automation
+        </button>
       </nav>
 
       <button className="new-chat" onClick={onNew}>

@@ -64,4 +64,30 @@ urlpatterns = [
         views.memory_delete,
         name="memory-delete",
     ),
+    path(
+        "automation/propose/",
+        views.automation_propose,
+        name="automation-propose",
+    ),
+    path(
+        "automation/actions/",
+        views.automation_list,
+        name="automation-list",
+    ),
+    path(
+        "automation/actions/<int:pk>/approve/",
+        views.automation_approve,
+        name="automation-approve",
+    ),
+    path(
+        "automation/actions/<int:pk>/deny/",
+        views.automation_deny,
+        name="automation-deny",
+    ),
+    path(
+        "automation/actions/<int:pk>/execute/",
+        views.automation_execute,
+        name="automation-execute",
+    ),
+    path("automation/audit/", views.automation_audit, name="automation-audit"),
 ]

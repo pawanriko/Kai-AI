@@ -1635,6 +1635,471 @@ class PlanExecutionTests(LoggedInTestCase):
         self.assertEqual(Message.objects.count(), 0)
 
 
+# ---------------------------------------------------------------- Phase 8
+
+class AutomationServiceTests(TestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="pawan", password="pw"
+        )
+
+    def _propose(self, **kwargs):
+        from . import automation
+
+        kwargs.setdefault("target", "browser")
+        kwargs.setdefault("action", "navigate")
+        kwargs.setdefault("payload", {"url": "https://example.com"})
+        kwargs.setdefault("description", "Open example.com")
+        return automation.propose_action(self.user, **kwargs)
+
+    def test_propose_creates_pending_action_and_audit_entry(self):
+        from .models import AuditLog, AutomationAction
+
+        action = self._propose()
+        self.assertEqual(action.status, AutomationAction.Status.PENDING)
+        entry = AuditLog.objects.get()
+        self.assertEqual(entry.event, AuditLog.Event.PROPOSED)
+        self.assertEqual(entry.action_pk, action.pk)
+        self.assertEqual(entry.user, self.user)
+
+    def test_propose_rejects_bad_targets_actions_and_payloads(self):
+        from . import automation
+        from .models import AutomationAction
+
+        for kwargs in (
+            {"target": "nope"},
+            {"action": "explode"},
+            {"payload": {}},
+            {"payload": {"url": "file:///etc/passwd"}},
+            {"payload": {"url": ""}},
+            {"description": "  "},
+        ):
+            with self.assertRaises(ValueError):
+                self._propose(**kwargs)
+        self.assertEqual(AutomationAction.objects.count(), 0)
+        # click needs a selector, type needs text.
+        with self.assertRaises(ValueError):
+            self._propose(
+                action="click", payload={"url": "https://example.com"}
+            )
+
+    def test_decide_approves_and_denies_once_only(self):
+        from . import automation
+        from .models import AuditLog, AutomationAction
+
+        action = self._propose()
+        automation.decide_action(action, approve=True)
+        action.refresh_from_db()
+        self.assertEqual(action.status, AutomationAction.Status.APPROVED)
+        self.assertIsNotNone(action.decided_at)
+        with self.assertRaises(ValueError):
+            automation.decide_action(action, approve=False)
+
+        denied = self._propose(description="Second")
+        automation.decide_action(denied, approve=False)
+        denied.refresh_from_db()
+        self.assertEqual(denied.status, AutomationAction.Status.DENIED)
+        self.assertEqual(
+            AuditLog.objects.filter(event=AuditLog.Event.DENIED).count(), 1
+        )
+
+    def test_execute_refuses_unapproved_actions_without_touching_runner(
+        self,
+    ):
+        from . import automation
+
+        action = self._propose()
+        with mock.patch(
+            "chat.automation.get_runner"
+        ) as get_runner:
+            with self.assertRaises(PermissionError):
+                automation.execute_action(action)
+            get_runner.assert_not_called()
+
+        automation.decide_action(action, approve=False)
+        with mock.patch(
+            "chat.automation.get_runner"
+        ) as get_runner:
+            with self.assertRaises(PermissionError):
+                automation.execute_action(action)
+            get_runner.assert_not_called()
+
+    def test_execute_runs_approved_action_once_and_audits(self):
+        from . import automation
+        from .models import AuditLog, AutomationAction
+
+        action = self._propose()
+        automation.decide_action(action, approve=True)
+        runner = mock.Mock()
+        runner.run.return_value = "opened fine"
+        with mock.patch(
+            "chat.automation.get_runner", return_value=runner
+        ):
+            automation.execute_action(action)
+        runner.run.assert_called_once_with(
+            "navigate", {"url": "https://example.com"}
+        )
+        action.refresh_from_db()
+        self.assertEqual(action.status, AutomationAction.Status.EXECUTED)
+        self.assertEqual(action.result, "opened fine")
+        self.assertIsNotNone(action.executed_at)
+        self.assertEqual(
+            AuditLog.objects.filter(event=AuditLog.Event.EXECUTED).count(),
+            1,
+        )
+        with self.assertRaises(ValueError):
+            automation.execute_action(action)
+
+    def test_execute_runner_failure_becomes_failed_not_an_exception(self):
+        from . import automation
+        from .models import AuditLog, AutomationAction
+
+        action = self._propose()
+        automation.decide_action(action, approve=True)
+        runner = mock.Mock()
+        runner.run.side_effect = RuntimeError("browser exploded")
+        with mock.patch(
+            "chat.automation.get_runner", return_value=runner
+        ):
+            automation.execute_action(action)
+        action.refresh_from_db()
+        self.assertEqual(action.status, AutomationAction.Status.FAILED)
+        self.assertIn("browser exploded", action.result)
+        self.assertEqual(
+            AuditLog.objects.filter(event=AuditLog.Event.FAILED).count(), 1
+        )
+
+    def test_audit_entries_survive_action_deletion(self):
+        from .models import AuditLog
+
+        action = self._propose()
+        action.delete()
+        entry = AuditLog.objects.get()
+        self.assertEqual(entry.description, "Open example.com")
+
+
+class AutomationEndpointTests(LoggedInTestCase):
+    def _propose(self, **kwargs):
+        payload = {
+            "target": "browser",
+            "action": "navigate",
+            "payload": {"url": "https://example.com"},
+            "description": "Open example.com",
+        }
+        payload.update(kwargs)
+        return post_json(self.client, "/api/automation/propose/", payload)
+
+    def test_propose_list_and_audit_flow(self):
+        from .models import AuditLog, AutomationAction
+
+        response = self._propose()
+        self.assertEqual(response.status_code, 201)
+        action_id = response.json()["id"]
+        self.assertEqual(response.json()["status"], "pending")
+
+        data = self.client.get("/api/automation/actions/").json()
+        self.assertEqual(len(data["actions"]), 1)
+        data = self.client.get(
+            "/api/automation/actions/", {"status": "approved"}
+        ).json()
+        self.assertEqual(data["actions"], [])
+        self.assertEqual(
+            self.client.get(
+                "/api/automation/actions/", {"status": "bogus"}
+            ).status_code,
+            400,
+        )
+
+        entries = self.client.get("/api/automation/audit/").json()["entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["event"], "proposed")
+        self.assertEqual(entries[0]["action_pk"], action_id)
+        self.assertEqual(AutomationAction.objects.count(), 1)
+        self.assertEqual(AuditLog.objects.count(), 1)
+
+    def test_propose_validation_and_login(self):
+        self.assertEqual(self._propose(target="nope").status_code, 400)
+        self.assertEqual(
+            self._propose(payload={"url": "notaurl"}).status_code, 400
+        )
+        self.client.logout()
+        self.assertEqual(self._propose().status_code, 401)
+
+    def test_approve_deny_execute_flow_with_fake_runner(self):
+        action_id = self._propose().json()["id"]
+        # Execute before approval: 403, runner untouched.
+        with mock.patch("chat.automation.get_runner") as get_runner:
+            response = self.client.post(
+                f"/api/automation/actions/{action_id}/execute/"
+            )
+            self.assertEqual(response.status_code, 403)
+            get_runner.assert_not_called()
+
+        response = self.client.post(
+            f"/api/automation/actions/{action_id}/approve/"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "approved")
+        # Deciding twice is an error.
+        self.assertEqual(
+            self.client.post(
+                f"/api/automation/actions/{action_id}/deny/"
+            ).status_code,
+            400,
+        )
+
+        runner = mock.Mock()
+        runner.run.return_value = "opened fine"
+        with mock.patch(
+            "chat.automation.get_runner", return_value=runner
+        ):
+            response = self.client.post(
+                f"/api/automation/actions/{action_id}/execute/"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "executed")
+        self.assertEqual(response.json()["result"], "opened fine")
+        # Second execute: already completed.
+        self.assertEqual(
+            self.client.post(
+                f"/api/automation/actions/{action_id}/execute/"
+            ).status_code,
+            400,
+        )
+
+    def test_denied_action_can_never_execute(self):
+        action_id = self._propose().json()["id"]
+        self.client.post(f"/api/automation/actions/{action_id}/deny/")
+        response = self.client.post(
+            f"/api/automation/actions/{action_id}/execute/"
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_actions_and_audit_are_strictly_owner_scoped(self):
+        from .models import AuditLog, AutomationAction
+
+        action_id = self._propose().json()["id"]
+        stranger = get_user_model().objects.create_user(
+            username="stranger", password="pw"
+        )
+        AutomationAction.objects.create(
+            user=stranger,
+            target="browser",
+            action="navigate",
+            payload={"url": "https://example.com"},
+            description="Stranger action",
+        )
+        data = self.client.get("/api/automation/actions/").json()
+        self.assertEqual([a["id"] for a in data["actions"]], [action_id])
+        entries = self.client.get("/api/automation/audit/").json()["entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["description"], "Open example.com")
+        self.assertEqual(AuditLog.objects.count(), 1)
+        foreign = AutomationAction.objects.get(user=stranger)
+        self.assertEqual(
+            self.client.post(
+                f"/api/automation/actions/{foreign.pk}/approve/"
+            ).status_code,
+            404,
+        )
+
+
+class RunnerTests(TestCase):
+    # -- fake Playwright -------------------------------------------------
+    class FakeLocator:
+        def __init__(self, calls):
+            self._calls = calls
+
+        def inner_text(self, timeout=None):
+            return "fake page text"
+
+    class FakePage:
+        def __init__(self, calls):
+            self._calls = calls
+
+        def goto(self, url, timeout=None):
+            self._calls.append(("goto", url))
+
+        def title(self):
+            return "Fake Title"
+
+        def click(self, selector, timeout=None):
+            self._calls.append(("click", selector))
+
+        def fill(self, selector, text, timeout=None):
+            self._calls.append(("fill", selector, text))
+
+        def locator(self, selector):
+            self._calls.append(("locator", selector))
+            return RunnerTests.FakeLocator(self._calls)
+
+    class FakeBrowser:
+        def __init__(self, calls):
+            self._calls = calls
+            self.closed = False
+
+        def new_page(self):
+            return RunnerTests.FakePage(self._calls)
+
+        def close(self):
+            self.closed = True
+
+    class FakePlaywright:
+        def __init__(self, calls, browser_holder):
+            self._calls = calls
+            self._browser_holder = browser_holder
+            self.chromium = self
+
+        def launch(self, headless=True):
+            browser = RunnerTests.FakeBrowser(self._calls)
+            self._browser_holder.append(browser)
+            return browser
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _fake_factory(self):
+        calls = []
+        browsers = []
+        factory = lambda: self.FakePlaywright(calls, browsers)
+        return factory, calls, browsers
+
+    def test_browser_runner_navigates_clicks_types_extracts(self):
+        from .browser_agent import BrowserRunner
+
+        factory, calls, browsers = self._fake_factory()
+        runner = BrowserRunner(playwright_factory=factory)
+        with mock.patch(
+            "chat.browser_agent.research._check_url_public"
+        ):
+            self.assertIn(
+                "Fake Title",
+                runner.run("navigate", {"url": "https://example.com"}),
+            )
+            self.assertIn(
+                "Clicked #go",
+                runner.run(
+                    "click",
+                    {"url": "https://example.com", "selector": "#go"},
+                ),
+            )
+            self.assertIn(
+                "Typed into #q",
+                runner.run(
+                    "type",
+                    {
+                        "url": "https://example.com",
+                        "selector": "#q",
+                        "text": "hello",
+                    },
+                ),
+            )
+            self.assertEqual(
+                runner.run("extract", {"url": "https://example.com"}),
+                "fake page text",
+            )
+        self.assertTrue(all(b.closed for b in browsers))
+        self.assertIn(("goto", "https://example.com"), calls)
+        self.assertIn(("click", "#go"), calls)
+
+    def test_browser_runner_blocks_non_public_urls(self):
+        from .browser_agent import BrowserRunner
+
+        factory, _, _ = self._fake_factory()
+        runner = BrowserRunner(playwright_factory=factory)
+        with mock.patch(
+            "chat.research.socket.getaddrinfo",
+            return_value=[
+                (socket.AF_INET, None, None, None, ("127.0.0.1", 0))
+            ],
+        ):
+            with self.assertRaises(ValueError):
+                runner.run("navigate", {"url": "http://localhost/admin"})
+
+    def test_browser_runner_without_playwright_fails_clearly(self):
+        from .browser_agent import BrowserRunner
+
+        runner = BrowserRunner()
+        with mock.patch(
+            "chat.browser_agent.research._check_url_public"
+        ):
+            # Playwright is not installed in this environment: the
+            # lazy import raises, and execute_action would record
+            # that as FAILED — never a crash at import time.
+            with self.assertRaises(ImportError):
+                runner.run("navigate", {"url": "https://example.com"})
+
+    @mock.patch.dict(os.environ, {}, clear=True)
+    def test_oi_client_without_bridge_is_not_configured(self):
+        from .oi_client import OIClient
+
+        with self.assertRaises(RuntimeError) as caught:
+            OIClient().run("run", {"command": "list files"})
+        self.assertIn("not configured", str(caught.exception))
+
+    @mock.patch("chat.oi_client.urllib.request.urlopen")
+    def test_oi_client_posts_to_the_bridge(self, urlopen):
+        from .oi_client import OIClient
+
+        response = mock.MagicMock()
+        response.read.return_value = json.dumps(
+            {"output": "file1.py\nfile2.py", "exit_code": 0}
+        ).encode()
+        response.__enter__.return_value = response
+        urlopen.return_value = response
+        result = OIClient(bridge_url="http://localhost:8765").run(
+            "run", {"command": "list files in the test folder"}
+        )
+        request = urlopen.call_args[0][0]
+        self.assertEqual(request.full_url, "http://localhost:8765/run")
+        body = json.loads(request.data.decode())
+        self.assertEqual(body["command"], "list files in the test folder")
+        self.assertIn("exit 0", result)
+        self.assertIn("file1.py", result)
+
+    @mock.patch("chat.oi_client.urllib.request.urlopen")
+    def test_oi_client_bridge_errors_are_runtime_errors(self, urlopen):
+        from .oi_client import OIClient
+
+        urlopen.side_effect = urllib.error.URLError("refused")
+        with self.assertRaises(RuntimeError):
+            OIClient(bridge_url="http://localhost:8765").run(
+                "run", {"command": "x"}
+            )
+
+    @mock.patch("chat.n8n_client.urllib.request.urlopen")
+    def test_n8n_client_triggers_webhook(self, urlopen):
+        from .n8n_client import N8nClient
+
+        response = mock.MagicMock()
+        response.read.return_value = b'{"ok": true}'
+        response.status = 200
+        response.__enter__.return_value = response
+        urlopen.return_value = response
+        result = N8nClient().run(
+            "trigger",
+            {
+                "webhook_url": "https://n8n.example/webhook/abc",
+                "data": {"key": "value"},
+            },
+        )
+        request = urlopen.call_args[0][0]
+        self.assertEqual(
+            request.full_url, "https://n8n.example/webhook/abc"
+        )
+        self.assertEqual(json.loads(request.data.decode()), {"key": "value"})
+        self.assertIn("HTTP 200", result)
+
+    def test_n8n_client_rejects_bad_webhook_urls(self):
+        from .n8n_client import N8nClient
+
+        with self.assertRaises(ValueError):
+            N8nClient().run("trigger", {"webhook_url": "notaurl"})
+
+
 class SetupSecurityTests(TestCase):
     """Bootstrap-token gate on /api/auth/setup/ (post-Phase-1 review).
 

@@ -140,6 +140,90 @@ class Memory(models.Model):
         return self.fact[:60]
 
 
+class AutomationAction(models.Model):
+    """One proposed automation action (Phase 8), gated by approval.
+
+    Default-deny: an action is created PENDING and NOTHING executes
+    until the owner approves it; execution requires status
+    APPROVED and moves it to EXECUTED/FAILED in the same step, so
+    one approval can never run twice. Ownership is strict
+    (non-null user, no legacy NULL rows): automation rows are all
+    created post-auth, and no other account may even see them.
+    """
+
+    class Target(models.TextChoices):
+        BROWSER = "browser", "Browser"
+        COMPUTER = "computer", "Computer (Open Interpreter)"
+        WORKFLOW = "workflow", "Workflow (n8n)"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        APPROVED = "approved", "Approved"
+        DENIED = "denied", "Denied"
+        EXECUTED = "executed", "Executed"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="automation_actions",
+    )
+    target = models.CharField(max_length=16, choices=Target.choices)
+    action = models.CharField(max_length=40)
+    payload = models.JSONField(default=dict)
+    description = models.CharField(max_length=300)
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.PENDING,
+    )
+    result = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+    executed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"#{self.pk} {self.target}/{self.action} [{self.status}]"
+
+
+class AuditLog(models.Model):
+    """Append-only audit trail (Phase 8): every automation event,
+    denormalized so the trail survives deletion of the action it
+    describes. There is intentionally no update or delete path —
+    the log is written once and only ever read."""
+
+    class Event(models.TextChoices):
+        PROPOSED = "proposed", "Proposed"
+        APPROVED = "approved", "Approved"
+        DENIED = "denied", "Denied"
+        EXECUTED = "executed", "Executed"
+        FAILED = "failed", "Failed"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="audit_logs",
+    )
+    # The AutomationAction pk at event time (a snapshot, not a
+    # foreign key — the entry must outlive the action).
+    action_pk = models.IntegerField()
+    target = models.CharField(max_length=16)
+    action_name = models.CharField(max_length=40)
+    description = models.CharField(max_length=300)
+    event = models.CharField(max_length=16, choices=Event.choices)
+    detail = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"#{self.pk} {self.event} action {self.action_pk}"
+
+
 class Usage(models.Model):
     """Cost ledger (Phase 3): one row per provider call.
 

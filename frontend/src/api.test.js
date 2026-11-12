@@ -10,10 +10,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   addMemory,
+  approveAction,
   confirmMemory,
+  denyAction,
+  executeAction,
   exportMemories,
   exportReport,
   getMe,
+  listActions,
+  listAudit,
   listConversations,
   listDuplicates,
   listMemories,
@@ -21,6 +26,7 @@ import {
   login,
   logout,
   mergeMemories,
+  proposeAction,
   rejectMemory,
   requestPlan,
   sendChat,
@@ -382,5 +388,41 @@ describe('api.js auth + CSRF', () => {
     expect(body.plan).toEqual(['Step one'])
     expect(body.plan_approved).toBe(true)
     expect(body.agent).toBe(true)
+  })
+
+  it('proposes, decides, executes, and lists automation via the right routes', async () => {
+    let fetchMock = mockFetch(jsonResponse(201, { id: 1, status: 'pending' }))
+    await proposeAction('browser', 'navigate', { url: 'https://x.example' }, 'Open x')
+    let [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/automation/propose/')
+    expect(JSON.parse(options.body).description).toBe('Open x')
+
+    fetchMock = mockFetch(jsonResponse(200, { actions: [] }))
+    await listActions('pending')
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/automation/actions/?status=pending'
+    )
+
+    fetchMock = mockFetch(jsonResponse(200, { id: 1, status: 'approved' }))
+    await approveAction(1)
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/automation/actions/1/approve/'
+    )
+    fetchMock = mockFetch(jsonResponse(200, { id: 1, status: 'denied' }))
+    await denyAction(1)
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/automation/actions/1/deny/'
+    )
+    fetchMock = mockFetch(jsonResponse(200, { id: 1, status: 'executed' }))
+    await executeAction(1)
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/automation/actions/1/execute/'
+    )
+
+    fetchMock = mockFetch(jsonResponse(200, { entries: [] }))
+    await listAudit('executed')
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/automation/audit/?event=executed'
+    )
   })
 })

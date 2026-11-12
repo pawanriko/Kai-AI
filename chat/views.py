@@ -28,6 +28,12 @@
     POST   /api/memories/<id>/reject/  → drop a suggestion    (login)
     POST   /api/memories/<id>/scope/   → set project scope    (login)
     DELETE /api/memories/<id>/delete/                         (login)
+    POST   /api/automation/propose/    → propose an action    (login)
+    GET    /api/automation/actions/    → list actions         (login)
+    POST   /api/automation/actions/<id>/approve/              (login)
+    POST   /api/automation/actions/<id>/deny/                 (login)
+    POST   /api/automation/actions/<id>/execute/              (login)
+    GET    /api/automation/audit/      → audit trail          (login)
 
 Phase 1 security shape: everything except ping + the auth endpoints
 requires a logged-in session; every state-changing request requires
@@ -59,8 +65,26 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
-from . import agent, ai, bundles, coding_tools, dedupe, ledger, reports, router
-from .models import Conversation, Memory, Message, SetupGuard, Usage
+from . import (
+    agent,
+    ai,
+    automation,
+    bundles,
+    coding_tools,
+    dedupe,
+    ledger,
+    reports,
+    router,
+)
+from .models import (
+    AuditLog,
+    AutomationAction,
+    Conversation,
+    Memory,
+    Message,
+    SetupGuard,
+    Usage,
+)
 from .ratelimit import rate_limit
 
 SYSTEM_PROMPT = (
@@ -1090,3 +1114,143 @@ def memory_delete(request, pk):
     memory = get_object_or_404(_visible_memories(request), pk=pk)
     memory.delete()
     return JsonResponse({}, status=204)
+
+
+# ---------------------------------------------------------------- automation
+# Phase 8: audit log + per-action approvals FIRST. Every endpoint is
+# owner-scoped (strict user filter — no legacy visibility), and
+# execution is default-deny: the service layer refuses anything
+# that is not APPROVED, and these views map that refusal to 403.
+
+
+def _automation_dict(action):
+    return {
+        "id": action.pk,
+        "target": action.target,
+        "action": action.action,
+        "payload": action.payload,
+        "description": action.description,
+        "status": action.status,
+        "result": action.result,
+        "created_at": action.created_at.isoformat(),
+        "decided_at": action.decided_at.isoformat() if action.decided_at else None,
+        "executed_at": action.executed_at.isoformat() if action.executed_at else None,
+    }
+
+
+def _audit_dict(entry):
+    return {
+        "id": entry.pk,
+        "action_pk": entry.action_pk,
+        "target": entry.target,
+        "action_name": entry.action_name,
+        "description": entry.description,
+        "event": entry.event,
+        "detail": entry.detail,
+        "created_at": entry.created_at.isoformat(),
+    }
+
+
+@login_required_json
+@require_POST
+@rate_limit("automation", 30, 60)
+def automation_propose(request):
+    """POST /api/automation/propose/ {"target", "action", "payload",
+    "description"} → 201 + the PENDING action. Proposing never
+    executes anything."""
+    body = _json_body(request)
+    if body is None:
+        return JsonResponse({"error": "invalid JSON"}, status=400)
+    try:
+        action = automation.propose_action(
+            request.user,
+            body.get("target"),
+            body.get("action"),
+            body.get("payload"),
+            body.get("description"),
+        )
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse(_automation_dict(action), status=201)
+
+
+@login_required_json
+def automation_list(request):
+    """GET /api/automation/actions/ → the owner's actions, newest
+    first. ?status= filters to one status."""
+    rows = AutomationAction.objects.filter(user=request.user)
+    status = request.GET.get("status", "").strip()
+    if status:
+        if status not in AutomationAction.Status.values:
+            return JsonResponse(
+                {"error": f"unknown status: {status}"}, status=400
+            )
+        rows = rows.filter(status=status)
+    return JsonResponse({"actions": [_automation_dict(a) for a in rows]})
+
+
+def _owned_action(request, pk):
+    return get_object_or_404(
+        AutomationAction.objects.filter(user=request.user), pk=pk
+    )
+
+
+@login_required_json
+@require_POST
+@rate_limit("automation", 30, 60)
+def automation_approve(request, pk):
+    """POST /api/automation/actions/<id>/approve/ → the APPROVED
+    action. Approval alone executes nothing."""
+    action = _owned_action(request, pk)
+    try:
+        automation.decide_action(action, approve=True)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse(_automation_dict(action))
+
+
+@login_required_json
+@require_POST
+@rate_limit("automation", 30, 60)
+def automation_deny(request, pk):
+    """POST /api/automation/actions/<id>/deny/ → the DENIED action."""
+    action = _owned_action(request, pk)
+    try:
+        automation.decide_action(action, approve=False)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse(_automation_dict(action))
+
+
+@login_required_json
+@require_POST
+@rate_limit("automation", 30, 60)
+def automation_execute(request, pk):
+    """POST /api/automation/actions/<id>/execute/ → the EXECUTED
+    (or FAILED) action with its result. Default-deny: an action
+    that was never approved is 403 and its runner is never
+    touched."""
+    action = _owned_action(request, pk)
+    try:
+        automation.execute_action(action)
+    except PermissionError as exc:
+        return JsonResponse({"error": str(exc)}, status=403)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse(_automation_dict(action))
+
+
+@login_required_json
+def automation_audit(request):
+    """GET /api/automation/audit/ → the owner's audit trail, newest
+    first. ?event= filters to one event type. Append-only: there
+    is no endpoint that modifies or deletes entries."""
+    rows = AuditLog.objects.filter(user=request.user)
+    event = request.GET.get("event", "").strip()
+    if event:
+        if event not in AuditLog.Event.values:
+            return JsonResponse(
+                {"error": f"unknown event: {event}"}, status=400
+            )
+        rows = rows.filter(event=event)
+    return JsonResponse({"entries": [_audit_dict(e) for e in rows]})

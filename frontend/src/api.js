@@ -263,3 +263,34 @@ export function rejectMemory(id) {
 export function deleteMemory(id) {
   return request(`/api/memories/${id}/delete/`, { method: 'DELETE' })
 }
+
+// --- automation (Phase 8): gated actions + audit trail ----------
+
+export function proposeAction(target, action, payload, description) {
+  return request('/api/automation/propose/', {
+    method: 'POST',
+    body: JSON.stringify({ target, action, payload, description }),
+  })
+}
+
+export function listActions(status) {
+  const suffix = status ? `?status=${encodeURIComponent(status)}` : ''
+  return request(`/api/automation/actions/${suffix}`)
+}
+
+export function approveAction(id) {
+  return request(`/api/automation/actions/${id}/approve/`, { method: 'POST' })
+}
+
+export function denyAction(id) {
+  return request(`/api/automation/actions/${id}/deny/`, { method: 'POST' })
+}
+
+export function executeAction(id) {
+  return request(`/api/automation/actions/${id}/execute/`, { method: 'POST' })
+}
+
+export function listAudit(event) {
+  const suffix = event ? `?event=${encodeURIComponent(event)}` : ''
+  return request(`/api/automation/audit/${suffix}`)
+}

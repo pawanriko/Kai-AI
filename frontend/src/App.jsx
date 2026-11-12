@@ -19,6 +19,7 @@ import MessageList from './components/MessageList'
 import PlanReview from './components/PlanReview'
 import Sidebar from './components/Sidebar'
 import UsagePanel from './components/UsagePanel'
+import AutomationPanel from './components/AutomationPanel'
 
 // App is the conductor: it owns the shared state (which conversation
 // is open, its messages, the chosen model) and passes data + callbacks
@@ -405,6 +406,8 @@ export default function App() {
           <MemoryPanel />
         ) : view === 'usage' ? (
           <UsagePanel />
+        ) : view === 'automation' ? (
+          <AutomationPanel />
         ) : (
           <>
             {error && <div className="error-box">{error}</div>}
