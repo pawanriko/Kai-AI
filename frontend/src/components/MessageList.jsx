@@ -1,4 +1,11 @@
-import { memo, useEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
+
+import {
+  DEFAULT_VOICE_LANG,
+  speak,
+  speechSynthesisSupported,
+  stopSpeaking,
+} from '../voice'
 
 // The scrolling transcript. Messages are plain text for now (line
 // breaks preserved via CSS white-space); rich markdown rendering is a
@@ -21,13 +28,27 @@ import { memo, useEffect, useRef } from 'react'
 
 const NEAR_BOTTOM_PX = 120
 
-function MessageBubble({ message: m }) {
+function MessageBubble({ message: m, bubbleKey, speaking, onSpeak }) {
   return (
     <div className="bubble">
       <div className="bubble-role">{m.role === 'user' ? 'YOU' : 'KAI'}</div>
       <div className="bubble-text">{m.content}</div>
       {(m.incomplete || m.status === 'incomplete') && (
         <div className="bubble-note">⚠️ Response interrupted — incomplete</div>
+      )}
+      {/* Phase 7 (Stage A): read-aloud for assistant replies, via
+          speechSynthesis. The button appears only where the API
+          exists; speaking state lives in MessageList so only one
+          bubble can talk at a time. onSpeak is a stable callback
+          taking the bubble key, so React.memo keeps working. */}
+      {m.role === 'assistant' && speechSynthesisSupported() && (
+        <button
+          className="speak-btn"
+          onClick={() => onSpeak(bubbleKey, m.content)}
+          title={speaking ? 'Stop reading aloud' : 'Read aloud'}
+        >
+          {speaking ? '⏹ Stop' : '🔊 Read aloud'}
+        </button>
       )}
       {m.trace && m.trace.length > 0 && (
         <details className="trace">
@@ -47,9 +68,33 @@ function MessageBubble({ message: m }) {
 
 const MemoBubble = memo(MessageBubble)
 
-export default function MessageList({ messages, sending }) {
+export default function MessageList({
+  messages,
+  sending,
+  voiceLang = DEFAULT_VOICE_LANG,
+}) {
   const listRef = useRef(null)
   const stickRef = useRef(true)
+  const [speakingKey, setSpeakingKey] = useState(null)
+
+  // Stop any speech when the transcript unmounts (view switch).
+  useEffect(() => () => stopSpeaking(), [])
+
+  const handleSpeak = useCallback(
+    (key, content) => {
+      if (speakingKey === key) {
+        stopSpeaking()
+        setSpeakingKey(null)
+        return
+      }
+      const started = speak(content, {
+        lang: voiceLang,
+        onDone: () => setSpeakingKey(null),
+      })
+      if (started) setSpeakingKey(key)
+    },
+    [speakingKey, voiceLang]
+  )
 
   function handleScroll() {
     const el = listRef.current
@@ -85,7 +130,12 @@ export default function MessageList({ messages, sending }) {
     <div className="messages" ref={listRef} onScroll={handleScroll}>
       {messages.map((m, i) => (
         <div key={m.id ?? `local-${i}`} className={`bubble-row ${m.role}`}>
-          <MemoBubble message={m} />
+          <MemoBubble
+            message={m}
+            bubbleKey={m.id ?? `local-${i}`}
+            speaking={speakingKey === (m.id ?? `local-${i}`)}
+            onSpeak={handleSpeak}
+          />
         </div>
       ))}
       {sending && (

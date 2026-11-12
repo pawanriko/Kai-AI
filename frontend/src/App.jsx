@@ -41,6 +41,9 @@ export default function App() {
   const [planFirst, setPlanFirst] = useState(false)
   const [bundle, setBundle] = useState('all')
   const [pendingPlan, setPendingPlan] = useState(null)
+  // Phase 7 (Stage A): one voice language for speech input and
+  // read-aloud, shared by the composer and the transcript.
+  const [voiceLang, setVoiceLang] = useState('en-IN')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
 
@@ -426,6 +429,7 @@ export default function App() {
                 sending &&
                 messages[messages.length - 1]?.role !== 'assistant'
               }
+              voiceLang={voiceLang}
             />
             <ChatInput
               providers={providers}
@@ -439,6 +443,8 @@ export default function App() {
               onPlanFirst={setPlanFirst}
               bundle={bundle}
               onBundle={setBundle}
+              voiceLang={voiceLang}
+              onVoiceLang={setVoiceLang}
               onSend={handleSend}
               sending={sending}
             />

@@ -17,7 +17,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatInput from './ChatInput'
 
@@ -231,5 +231,159 @@ describe('ChatInput Auto option (Phase 3)', () => {
     expect(options[0].value).toBe('auto')
     expect(options[0].textContent).toContain('Auto')
     expect(options[0].disabled).toBe(false)
+  })
+})
+
+describe('ChatInput voice controls (Phase 7 Stage A)', () => {
+  class FakeRecognition {
+    static instances = []
+
+    constructor() {
+      FakeRecognition.instances.push(this)
+      this.start = vi.fn()
+      this.stop = vi.fn()
+    }
+
+    fireResult(transcript, isFinal) {
+      this.onresult({
+        resultIndex: 0,
+        results: [{ 0: { transcript }, isFinal }],
+      })
+    }
+
+    fireError(code) {
+      this.onerror({ error: code })
+    }
+
+    fireEnd() {
+      this.onend()
+    }
+  }
+
+  beforeEach(() => {
+    FakeRecognition.instances = []
+    window.SpeechRecognition = FakeRecognition
+  })
+
+  afterEach(() => {
+    delete window.SpeechRecognition
+  })
+
+  function renderVoiceInput(props = {}) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push(root)
+    act(() => {
+      root.render(
+        <ChatInput
+          providers={PROVIDERS}
+          model="groq::llama-3.3-70b-versatile"
+          onModel={() => {}}
+          agent={false}
+          onAgent={() => {}}
+          coding={false}
+          onCoding={() => {}}
+          planFirst={false}
+          onPlanFirst={() => {}}
+          bundle="all"
+          onBundle={() => {}}
+          voiceLang={props.voiceLang ?? 'en-IN'}
+          onVoiceLang={props.onVoiceLang ?? (() => {})}
+          onSend={() => {}}
+          sending={false}
+        />
+      )
+    })
+    return container
+  }
+
+  function micButton(container) {
+    return container.querySelector('.mic-btn')
+  }
+
+  it('shows the mic button and language picker when supported', () => {
+    const container = renderVoiceInput()
+    expect(micButton(container)).toBeTruthy()
+    expect(micButton(container).textContent).toContain('Speak')
+    expect(container.querySelector('.voice-lang-picker')).toBeTruthy()
+  })
+
+  it('starts listening on click and appends final transcripts', () => {
+    const container = renderVoiceInput()
+    act(() => {
+      micButton(container).dispatchEvent(
+        new MouseEvent('click', { bubbles: true })
+      )
+    })
+    const recognition = FakeRecognition.instances[0]
+    expect(recognition.start).toHaveBeenCalledTimes(1)
+    expect(recognition.lang).toBe('en-IN')
+    expect(micButton(container).textContent).toContain('Stop')
+    act(() => {
+      recognition.fireResult('hello kai', true)
+    })
+    expect(container.querySelector('.composer-input').value).toBe('hello kai')
+    act(() => {
+      recognition.fireEnd()
+    })
+    expect(micButton(container).textContent).toContain('Speak')
+  })
+
+  it('shows interim previews and friendly errors without touching the box', () => {
+    const container = renderVoiceInput()
+    act(() => {
+      micButton(container).dispatchEvent(
+        new MouseEvent('click', { bubbles: true })
+      )
+    })
+    const recognition = FakeRecognition.instances[0]
+    act(() => {
+      recognition.fireResult('hearing', false)
+    })
+    expect(container.textContent).toContain('Hearing: hearing')
+    expect(container.querySelector('.composer-input').value).toBe('')
+    act(() => {
+      recognition.fireError('not-allowed')
+    })
+    expect(container.textContent).toContain('Microphone blocked')
+  })
+
+  it('stops listening on a second click', () => {
+    const container = renderVoiceInput()
+    act(() => {
+      micButton(container).dispatchEvent(
+        new MouseEvent('click', { bubbles: true })
+      )
+    })
+    const recognition = FakeRecognition.instances[0]
+    act(() => {
+      micButton(container).dispatchEvent(
+        new MouseEvent('click', { bubbles: true })
+      )
+    })
+    expect(recognition.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('changes the voice language through the picker', () => {
+    const onVoiceLang = vi.fn()
+    const container = renderVoiceInput({ onVoiceLang })
+    const picker = container.querySelector('.voice-lang-picker')
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype,
+        'value'
+      ).set
+      setter.call(picker, 'hi-IN')
+      picker.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(onVoiceLang).toHaveBeenCalledWith('hi-IN')
+  })
+
+  it('hides voice controls when the browser has no speech APIs', () => {
+    delete window.SpeechRecognition
+    const container = renderVoiceInput()
+    expect(micButton(container)).toBeNull()
+    expect(container.querySelector('.voice-lang-picker')).toBeNull()
   })
 })

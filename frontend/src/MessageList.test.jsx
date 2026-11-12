@@ -21,7 +21,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { renderToString } from 'react-dom/server'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import MessageList from './components/MessageList'
 
@@ -245,5 +245,90 @@ describe('MessageList interrupted label', () => {
       />
     )
     expect(html).not.toContain('Response interrupted')
+  })
+})
+
+describe('MessageList read-aloud (Phase 7 Stage A)', () => {
+  let utterances
+
+  beforeEach(() => {
+    utterances = []
+    window.speechSynthesis = { speak: vi.fn(), cancel: vi.fn() }
+    window.SpeechSynthesisUtterance = class {
+      constructor(text) {
+        this.text = text
+        utterances.push(this)
+      }
+    }
+  })
+
+  afterEach(() => {
+    delete window.speechSynthesis
+    delete window.SpeechSynthesisUtterance
+  })
+
+  function renderSpeakingList(messages, voiceLang) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push(root)
+    act(() => {
+      root.render(
+        <MessageList
+          messages={messages}
+          sending={false}
+          voiceLang={voiceLang}
+        />
+      )
+    })
+    return container
+  }
+
+  it('reads an assistant reply aloud in the chosen language', () => {
+    const container = renderSpeakingList(
+      [{ id: 1, role: 'assistant', content: 'Hello there' }],
+      'hi-IN'
+    )
+    const button = container.querySelector('.speak-btn')
+    expect(button).toBeTruthy()
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(utterances[0].text).toBe('Hello there')
+    expect(utterances[0].lang).toBe('hi-IN')
+    expect(window.speechSynthesis.speak).toHaveBeenCalledTimes(1)
+    expect(button.textContent).toContain('Stop')
+  })
+
+  it('stops on a second click and clears state when speech ends', () => {
+    const container = renderSpeakingList([
+      { id: 1, role: 'assistant', content: 'Hello there' },
+    ])
+    const button = container.querySelector('.speak-btn')
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(window.speechSynthesis.cancel).toHaveBeenCalled()
+    expect(button.textContent).toContain('Read aloud')
+  })
+
+  it('offers no read-aloud on user messages', () => {
+    const container = renderSpeakingList([
+      { id: 1, role: 'user', content: 'Hi' },
+      { id: 2, role: 'assistant', content: 'Hello' },
+    ])
+    expect(container.querySelectorAll('.speak-btn').length).toBe(1)
+  })
+
+  it('shows no speak buttons when synthesis is missing', () => {
+    delete window.speechSynthesis
+    delete window.SpeechSynthesisUtterance
+    const container = renderSpeakingList([
+      { id: 1, role: 'assistant', content: 'Hello' },
+    ])
+    expect(container.querySelector('.speak-btn')).toBeNull()
   })
 })

@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 
+import {
+  DEFAULT_VOICE_LANG,
+  VOICE_LANGUAGES,
+  createRecognizer,
+  speechRecognitionSupported,
+  speechSynthesisSupported,
+  voiceErrorMessage,
+} from '../voice'
+
 // Bottom bar: provider-grouped model picker, Agent mode toggle,
 // message box, Send. Enter sends, Shift+Enter makes a new line.
 // Picker options come from the backend catalogue; providers without
@@ -16,6 +25,8 @@ export default function ChatInput({
   onPlanFirst,
   bundle,
   onBundle,
+  voiceLang = DEFAULT_VOICE_LANG,
+  onVoiceLang = () => {},
   onSend,
   sending,
 }) {
@@ -34,6 +45,60 @@ export default function ChatInput({
   useEffect(() => {
     if (!sending) submittingRef.current = false
   }, [sending])
+
+  // Phase 7 (Stage A): push-to-talk via the Web Speech API.
+  // Listening runs only while the user asked for it — one
+  // utterance, then the session ends on its own. Final phrases
+  // append to the message box; interim text is only a preview.
+  const [listening, setListening] = useState(false)
+  const [interim, setInterim] = useState('')
+  const [voiceError, setVoiceError] = useState('')
+  const recognizerRef = useRef(null)
+  const sttSupported = speechRecognitionSupported()
+  const voiceSupported =
+    sttSupported || speechSynthesisSupported()
+
+  useEffect(
+    () => () => {
+      recognizerRef.current?.stop()
+    },
+    []
+  )
+
+  function toggleListening() {
+    if (listening) {
+      recognizerRef.current?.stop()
+      return
+    }
+    setVoiceError('')
+    setInterim('')
+    const recognizer = createRecognizer({
+      lang: voiceLang,
+      onFinal: (transcript) => {
+        if (!transcript) return
+        setText((prev) => (prev ? `${prev} ${transcript}` : transcript))
+      },
+      onInterim: setInterim,
+      onError: (code) => setVoiceError(voiceErrorMessage(code)),
+      onEnd: () => {
+        setListening(false)
+        setInterim('')
+        recognizerRef.current = null
+      },
+    })
+    if (!recognizer) {
+      setVoiceError('Speech recognition is not available in this browser.')
+      return
+    }
+    recognizerRef.current = recognizer
+    recognizer.start()
+    setListening(true)
+  }
+
+  function changeVoiceLang(code) {
+    if (listening) recognizerRef.current?.stop()
+    onVoiceLang(code)
+  }
 
   function submit() {
     const value = text.trim()
@@ -130,6 +195,38 @@ export default function ChatInput({
       <button className="send-btn" onClick={submit} disabled={sending}>
         Send
       </button>
+      {sttSupported && (
+        <button
+          className={listening ? 'mic-btn listening' : 'mic-btn'}
+          onClick={toggleListening}
+          title={
+            listening
+              ? 'Stop listening'
+              : 'Speak: dictate your message (push to talk)'
+          }
+        >
+          {listening ? '⏹ Stop' : '🎤 Speak'}
+        </button>
+      )}
+      {voiceSupported && (
+        <select
+          className="voice-lang-picker"
+          value={voiceLang}
+          onChange={(e) => changeVoiceLang(e.target.value)}
+          title="Voice language (speech input and read-aloud)"
+        >
+          {VOICE_LANGUAGES.map((l) => (
+            <option key={l.code} value={l.code}>
+              {l.label}
+            </option>
+          ))}
+        </select>
+      )}
+      {(interim || voiceError) && (
+        <span className="voice-hint">
+          {voiceError || `Hearing: ${interim}`}
+        </span>
+      )}
     </div>
   )
 }
