@@ -22,6 +22,8 @@ import {
   logout,
   mergeMemories,
   rejectMemory,
+  requestPlan,
+  sendChat,
   sendChatStream,
   setMemoryScope,
   setupOwner,
@@ -351,5 +353,34 @@ describe('api.js auth + CSRF', () => {
     expect(fetchMock.mock.calls[0][0]).toBe(
       '/api/conversations/12/report/'
     )
+  })
+
+  it('requests a plan without running tools', async () => {
+    const fetchMock = mockFetch(
+      jsonResponse(200, { plan: { steps: ['Search'] } })
+    )
+    await requestPlan('Research this', 4, 'auto', 'research')
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/chat/plan/')
+    expect(JSON.parse(options.body)).toEqual({
+      message: 'Research this',
+      conversation_id: 4,
+      model: 'auto',
+      bundle: 'research',
+    })
+  })
+
+  it('sendChat merges extra fields for approved plans', async () => {
+    const fetchMock = mockFetch(jsonResponse(200, { reply: 'done' }))
+    await sendChat('Do it', null, 'auto', true, false, false, {
+      bundle: 'research',
+      plan: ['Step one'],
+      plan_approved: true,
+    })
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.bundle).toBe('research')
+    expect(body.plan).toEqual(['Step one'])
+    expect(body.plan_approved).toBe(true)
+    expect(body.agent).toBe(true)
   })
 })

@@ -10,6 +10,8 @@
     GET    /api/models/                → provider catalogue   (login)
     GET    /api/usage/                 → cost-ledger readout  (login)
     POST   /api/chat/                  → send a message       (login)
+    POST   /api/chat/plan/              → plan a request, no
+                                         tools run            (login)
     POST   /api/chat/stream/           → send a message, reply
                                          streamed as NDJSON     (login)
     GET    /api/conversations/         → list conversations   (login)
@@ -57,7 +59,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
-from . import agent, ai, coding_tools, dedupe, ledger, reports, router
+from . import agent, ai, bundles, coding_tools, dedupe, ledger, reports, router
 from .models import Conversation, Memory, Message, SetupGuard, Usage
 from .ratelimit import rate_limit
 
@@ -394,8 +396,10 @@ def _chat_context(request):
     # Step 0 containment: coding execution is a server-side decision.
     # The client toggle means nothing on its own — with the kill
     # switch off (always, in production) the request is rejected
-    # here, before any agent or tool code runs.
-    if body.get("coding"):
+    # here, before any agent or tool code runs. The coding tool
+    # bundle (Phase 6) is gated exactly like the coding flag: both
+    # reach the same workspace tools.
+    if body.get("coding") or body.get("bundle") == "coding":
         if not coding_tools.execution_enabled():
             return (
                 JsonResponse(
@@ -553,10 +557,41 @@ def _usage_callback(request, task, kind):
 def chat(request):
     """POST /api/chat/  {"message": str, "conversation_id"?: int,
     "model"?: str, "agent"?: bool, "coding"?: bool,
-    "confirm_commands"?: bool} → {"reply", "conversation_id", "trace"}"""
+    "confirm_commands"?: bool, "bundle"?: str, "plan"?: [str],
+    "plan_approved"?: bool} → {"reply", "conversation_id", "trace"}
+
+    Phase 6: `bundle` restricts the agent's tools to a named set
+    (unknown names are 400); `plan` carries an already-approved
+    step list and requires `plan_approved: true` plus agent mode
+    — an unapproved plan never executes.
+    """
     error, body, user_text, conversation, messages = _chat_context(request)
     if error is not None:
         return error
+
+    bundle = body.get("bundle") or None
+    if bundle is not None:
+        try:
+            bundles.schemas_for(bundle)
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+    plan = body.get("plan") or None
+    if plan is not None:
+        if not body.get("agent") and not body.get("coding"):
+            return JsonResponse(
+                {"error": "a plan requires agent mode"}, status=400
+            )
+        if not body.get("plan_approved"):
+            return JsonResponse(
+                {"error": "approve the plan before executing it"},
+                status=400,
+            )
+        if not isinstance(plan, list) or not all(
+            isinstance(s, str) for s in plan
+        ):
+            return JsonResponse(
+                {"error": "plan must be a list of steps"}, status=400
+            )
 
     task = router.classify_task(user_text)
     trace = []
@@ -566,12 +601,16 @@ def chat(request):
             body.get("model") or None,
             coding=True,
             on_usage=_usage_callback(request, task, Usage.Kind.AGENT),
+            plan=plan,
+            bundle=bundle,
         )
     elif body.get("agent"):
         reply, trace = agent.run_agent(
             messages,
             body.get("model") or None,
             on_usage=_usage_callback(request, task, Usage.Kind.AGENT),
+            plan=plan,
+            bundle=bundle,
         )
     else:
         reply = ai.ask_ai(
@@ -655,6 +694,46 @@ def _stream_events(request, body, user_text, conversation, messages,
     # it persists INCOMPLETE and never harvests.
     _harvest_memories(
         request, user_text, reply, on_usage=extract_usage
+    )
+
+
+@login_required_json
+@rate_limit("chat", 30, 60)
+def chat_plan(request):
+    """POST /api/chat/plan/  {"message", "conversation_id"?: int,
+    "model"?: str, "bundle"?: str} → {"plan": {"steps": [...]},
+    "bundle", "conversation_id"}. Plan-then-execute, step 1: the
+    model breaks the request into steps with NO tools running and
+    nothing saved. The UI shows the steps; execution happens only
+    when the user approves and /api/chat/ is called with the plan
+    plus plan_approved. Shares the chat rate-limit bucket — a plan
+    is an AI call like any other."""
+    error, body, user_text, conversation, messages = _chat_context(request)
+    if error is not None:
+        return error
+
+    bundle = body.get("bundle") or None
+    if bundle is not None:
+        try:
+            bundles.schemas_for(bundle)
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+
+    task = router.classify_task(user_text)
+    steps = agent.make_plan(
+        messages,
+        body.get("model") or None,
+        bundle=bundle,
+        on_usage=_usage_callback(request, task, Usage.Kind.AGENT),
+    )
+    if steps is None:
+        return JsonResponse({"error": "AI unavailable"}, status=502)
+    return JsonResponse(
+        {
+            "plan": {"steps": steps},
+            "bundle": bundle,
+            "conversation_id": conversation.pk if conversation else None,
+        }
     )
 
 

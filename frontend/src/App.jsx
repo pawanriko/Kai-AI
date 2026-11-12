@@ -8,6 +8,7 @@ import {
   listConversations,
   listModels,
   logout as apiLogout,
+  requestPlan,
   sendChat,
   sendChatStream,
 } from './api'
@@ -15,6 +16,7 @@ import ChatInput from './components/ChatInput'
 import Login from './components/Login'
 import MemoryPanel from './components/MemoryPanel'
 import MessageList from './components/MessageList'
+import PlanReview from './components/PlanReview'
 import Sidebar from './components/Sidebar'
 import UsagePanel from './components/UsagePanel'
 
@@ -33,6 +35,12 @@ export default function App() {
   const [model, setModel] = useState('groq::llama-3.3-70b-versatile')
   const [agent, setAgent] = useState(false)
   const [coding, setCoding] = useState(false)
+  // Phase 6: plan-then-execute + tool bundles. `pendingPlan` holds
+  // a proposed plan the user has not approved yet — no message has
+  // been sent while it is set.
+  const [planFirst, setPlanFirst] = useState(false)
+  const [bundle, setBundle] = useState('all')
+  const [pendingPlan, setPendingPlan] = useState(null)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
 
@@ -228,7 +236,48 @@ export default function App() {
     setCoding(value)
   }
 
-  async function handleSend(text) {
+  // Phase 6: approving a plan sends the original message with the
+  // plan attached — the server executes only approved plans.
+  // Cancelling sends nothing; the message was never shown.
+  function approvePlan() {
+    const pending = pendingPlan
+    if (!pending) return
+    setPendingPlan(null)
+    handleSend(pending.text, {
+      plan: pending.plan.steps,
+      plan_approved: true,
+    })
+  }
+
+  function cancelPlan() {
+    setPendingPlan(null)
+  }
+
+  async function handleSend(text, extra = null) {
+    // Phase 6: plan-first mode asks for a plan BEFORE anything is
+    // sent — the user's message is not even shown optimistically
+    // until the plan is approved, so cancelling leaves no phantom
+    // message behind. `extra` (set by approvePlan) skips planning.
+    if (agent && planFirst && !extra) {
+      setError('')
+      setSending(true)
+      try {
+        const data = await requestPlan(
+          text,
+          activeId,
+          model,
+          bundle === 'all' ? null : bundle
+        )
+        setPendingPlan({ plan: data.plan, text })
+      } catch (err) {
+        if (!sessionExpired(err)) {
+          setError('Could not make a plan — is Django running?')
+        }
+      } finally {
+        setSending(false)
+      }
+      return
+    }
     setError('')
     setSending(true)
     // Optimistic: show the user's message before the server answers.
@@ -247,7 +296,18 @@ export default function App() {
         flushChunks()
         setActiveId(done.conversation_id)
       } else {
-        const data = await sendChat(text, activeId, model, agent, coding, coding)
+        const data = await sendChat(
+          text,
+          activeId,
+          model,
+          agent,
+          coding,
+          coding,
+          {
+            ...(bundle !== 'all' ? { bundle } : {}),
+            ...(extra || {}),
+          }
+        )
         setActiveId(data.conversation_id)
         setMessages((prev) => [
           ...prev,
@@ -345,6 +405,14 @@ export default function App() {
         ) : (
           <>
             {error && <div className="error-box">{error}</div>}
+            {pendingPlan && (
+              <PlanReview
+                plan={pendingPlan.plan}
+                message={pendingPlan.text}
+                onApprove={approvePlan}
+                onCancel={cancelPlan}
+              />
+            )}
             {activeId && (
               <div className="report-row">
                 <button type="button" onClick={downloadReport}>
@@ -367,6 +435,10 @@ export default function App() {
               onAgent={setAgent}
               coding={coding}
               onCoding={handleCoding}
+              planFirst={planFirst}
+              onPlanFirst={setPlanFirst}
+              bundle={bundle}
+              onBundle={setBundle}
               onSend={handleSend}
               sending={sending}
             />

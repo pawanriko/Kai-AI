@@ -1327,6 +1327,314 @@ class ReportTests(LoggedInTestCase):
         )
 
 
+# ---------------------------------------------------------------- Phase 6
+
+class BundleTests(TestCase):
+    def test_every_bundle_member_exists_in_the_registries(self):
+        from . import bundles
+
+        for name in bundles.BUNDLES:
+            schemas = bundles.schemas_for(name)
+            self.assertTrue(schemas)
+            self.assertEqual(
+                len(schemas), len(set(s["function"]["name"] for s in schemas))
+            )
+
+    def test_unknown_bundle_is_a_value_error(self):
+        from . import bundles
+
+        with self.assertRaises(ValueError):
+            bundles.schemas_for("nope")
+
+    def test_coding_bundle_is_the_only_one_with_workspace_tools(self):
+        from . import bundles
+
+        self.assertTrue(
+            bundles.includes_coding_tools(bundles.schemas_for("coding"))
+        )
+        self.assertFalse(
+            bundles.includes_coding_tools(bundles.schemas_for("research"))
+        )
+        self.assertFalse(
+            bundles.includes_coding_tools(
+                bundles.schemas_for("productivity")
+            )
+        )
+        names = [
+            s["function"]["name"]
+            for s in bundles.schemas_for("research")
+        ]
+        self.assertEqual(
+            set(names), {"web_search", "fetch_page", "current_datetime"}
+        )
+
+
+class PlanParsingTests(TestCase):
+    def test_numbered_and_bulleted_lines_become_steps(self):
+        from . import agent
+
+        self.assertEqual(
+            agent.parse_plan("1. Search the web\n2. Read the docs\n"),
+            ["Search the web", "Read the docs"],
+        )
+        self.assertEqual(
+            agent.parse_plan("- First step\n* Second step\n"),
+            ["First step", "Second step"],
+        )
+
+    def test_prose_falls_back_to_one_step_and_empty_to_none(self):
+        from . import agent
+
+        self.assertEqual(agent.parse_plan("Just do it."), ["Just do it."])
+        self.assertEqual(agent.parse_plan(""), [])
+        self.assertEqual(agent.parse_plan(None), [])
+
+    def test_steps_are_capped(self):
+        from . import agent
+
+        text = "\n".join(f"{i}. Step {i}" for i in range(1, 20))
+        self.assertEqual(len(agent.parse_plan(text)), agent.MAX_PLAN_STEPS)
+
+
+class PlanEndpointTests(LoggedInTestCase):
+    @mock.patch("chat.agent.ai.chat_completion")
+    def test_plan_returns_steps_and_saves_nothing(self, completion):
+        completion.return_value = {
+            "role": "assistant",
+            "content": "1. Search for Django 5.2 notes\n2. Read the release page",
+        }
+        response = post_json(
+            self.client,
+            "/api/chat/plan/",
+            {"message": "Is Django 5.2 out?", "bundle": "research"},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(
+            body["plan"]["steps"],
+            ["Search for Django 5.2 notes", "Read the release page"],
+        )
+        self.assertEqual(body["bundle"], "research")
+        self.assertEqual(Message.objects.count(), 0)
+        self.assertEqual(Conversation.objects.count(), 0)
+        # Planning runs with tools OFF — no tool call can happen.
+        self.assertIsNone(completion.call_args.kwargs["tools"])
+
+    @mock.patch("chat.agent.ai.chat_completion", return_value=None)
+    def test_plan_provider_failure_is_502(self, _completion):
+        response = post_json(
+            self.client, "/api/chat/plan/", {"message": "Plan this"}
+        )
+        self.assertEqual(response.status_code, 502)
+
+    def test_plan_rejects_unknown_bundle(self):
+        response = post_json(
+            self.client,
+            "/api/chat/plan/",
+            {"message": "Plan this", "bundle": "nope"},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_plan_requires_login(self):
+        self.client.logout()
+        self.assertEqual(
+            post_json(self.client, "/api/chat/plan/", {"message": "x"}).status_code,
+            401,
+        )
+
+
+class PlanExecutionTests(LoggedInTestCase):
+    def _tool_call_then_answer(self, completion, verify_text=None):
+        calls = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "calculator",
+                            "arguments": '{"expression": "2 + 3"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "It is 5."},
+        ]
+        if verify_text is not None:
+            calls.append({"role": "assistant", "content": verify_text})
+        completion.side_effect = calls
+
+    @mock.patch("chat.agent.ai.chat_completion")
+    def test_plan_is_recorded_and_guides_execution(self, completion):
+        from . import agent
+
+        self._tool_call_then_answer(
+            completion, "YES\nNothing missing."
+        )
+        reply, trace = agent.run_agent(
+            [
+                {"role": "system", "content": "You are KAI."},
+                {"role": "user", "content": "Add 2 and 3"},
+            ],
+            plan=["Calculate 2 + 3", "Report the result"],
+        )
+        self.assertEqual(reply, "It is 5.")
+        self.assertEqual(trace[0]["tool"], "plan")
+        self.assertEqual(
+            trace[0]["args"]["steps"],
+            ["Calculate 2 + 3", "Report the result"],
+        )
+        system_sent = completion.call_args_list[0][0][1][0]["content"]
+        self.assertIn("approved this plan", system_sent)
+        self.assertIn("Calculate 2 + 3", system_sent)
+        self.assertEqual(trace[-1]["tool"], "verify_completion")
+        self.assertIn("complete: yes", trace[-1]["result"])
+
+    @mock.patch("chat.agent.ai.chat_completion")
+    def test_verification_no_is_recorded_not_hidden(self, completion):
+        from . import agent
+
+        self._tool_call_then_answer(
+            completion, "NO\nThe second step never ran."
+        )
+        reply, trace = agent.run_agent(
+            [{"role": "user", "content": "Add 2 and 3"}]
+        )
+        self.assertEqual(reply, "It is 5.")
+        self.assertIn("complete: no", trace[-1]["result"])
+        self.assertIn("second step", trace[-1]["result"])
+
+    @mock.patch("chat.agent.ai.chat_completion")
+    def test_verification_failure_never_breaks_the_reply(self, completion):
+        from . import agent
+
+        # No third completion: the verification call exhausts the
+        # mock — the reply must still come back intact, with no
+        # verification entry.
+        self._tool_call_then_answer(completion)
+        reply, trace = agent.run_agent(
+            [{"role": "user", "content": "Add 2 and 3"}]
+        )
+        self.assertEqual(reply, "It is 5.")
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0]["tool"], "calculator")
+
+    @mock.patch("chat.agent.ai.chat_completion")
+    def test_bundle_restricts_offered_tools(self, completion):
+        from . import agent
+
+        completion.return_value = {"role": "assistant", "content": "Done."}
+        agent.run_agent(
+            [{"role": "user", "content": "Research this"}],
+            bundle="research",
+        )
+        offered = [
+            s["function"]["name"]
+            for s in completion.call_args.kwargs["tools"]
+        ]
+        self.assertEqual(
+            set(offered), {"web_search", "fetch_page", "current_datetime"}
+        )
+
+    @mock.patch.dict(os.environ, {"KAI_CODING_ENABLED": ""})
+    def test_coding_bundle_is_gated_by_the_kill_switch(self):
+        from . import agent
+
+        reply, trace = agent.run_agent(
+            [{"role": "user", "content": "Fix the code"}],
+            bundle="coding",
+        )
+        self.assertIn("disabled", reply)
+        self.assertEqual(trace, [])
+
+    @mock.patch.dict(os.environ, {"KAI_CODING_ENABLED": "1"})
+    @mock.patch("chat.agent.ai.chat_completion")
+    def test_coding_bundle_offers_workspace_tools_when_enabled(
+        self, completion
+    ):
+        from . import agent
+
+        completion.return_value = {"role": "assistant", "content": "Done."}
+        agent.run_agent(
+            [{"role": "user", "content": "Fix the code"}],
+            bundle="coding",
+        )
+        offered = [
+            s["function"]["name"]
+            for s in completion.call_args.kwargs["tools"]
+        ]
+        self.assertIn("run_command", offered)
+        self.assertIn("calculator", offered)
+
+    def test_unapproved_plan_never_executes(self):
+        response = post_json(
+            self.client,
+            "/api/chat/",
+            {
+                "message": "Do it",
+                "agent": True,
+                "plan": ["Step one"],
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Message.objects.count(), 0)
+
+    def test_plan_without_agent_mode_is_rejected(self):
+        response = post_json(
+            self.client,
+            "/api/chat/",
+            {
+                "message": "Do it",
+                "plan": ["Step one"],
+                "plan_approved": True,
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+
+    @mock.patch(
+        "chat.views.agent.run_agent", return_value=("done", [])
+    )
+    @mock.patch("chat.views.ai.extract_facts", return_value=[])
+    def test_approved_plan_reaches_the_orchestrator(
+        self, _facts, run_agent
+    ):
+        response = post_json(
+            self.client,
+            "/api/chat/",
+            {
+                "message": "Do it",
+                "agent": True,
+                "bundle": "research",
+                "plan": ["Step one"],
+                "plan_approved": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(run_agent.call_args.kwargs["plan"], ["Step one"])
+        self.assertEqual(run_agent.call_args.kwargs["bundle"], "research")
+
+    def test_unknown_bundle_is_rejected(self):
+        response = post_json(
+            self.client,
+            "/api/chat/",
+            {"message": "Do it", "agent": True, "bundle": "nope"},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_coding_bundle_needs_confirmation_like_coding_mode(self):
+        response = post_json(
+            self.client,
+            "/api/chat/",
+            {"message": "Do it", "agent": True, "bundle": "coding"},
+        )
+        # Kill switch off in this environment → 403 before the
+        # confirmation check; either way the request never runs.
+        self.assertIn(response.status_code, (400, 403))
+        self.assertEqual(Message.objects.count(), 0)
+
+
 class SetupSecurityTests(TestCase):
     """Bootstrap-token gate on /api/auth/setup/ (post-Phase-1 review).
 

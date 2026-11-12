@@ -17,6 +17,7 @@ urlpatterns = [
     path("models/", views.model_catalog, name="model-catalog"),
     path("usage/", views.usage_list, name="usage-list"),
     path("chat/", views.chat, name="chat"),
+    path("chat/plan/", views.chat_plan, name="chat-plan"),
     path("chat/stream/", views.chat_stream, name="chat-stream"),
     path("conversations/", views.conversation_list, name="conversation-list"),
     path(

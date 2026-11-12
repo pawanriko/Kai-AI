@@ -87,7 +87,8 @@ export function sendChat(
   model,
   agent = false,
   coding = false,
-  confirmCommands = false
+  confirmCommands = false,
+  extra = {}
 ) {
   return request('/api/chat/', {
     method: 'POST',
@@ -98,6 +99,21 @@ export function sendChat(
       agent,
       coding,
       confirm_commands: confirmCommands,
+      ...(extra || {}),
+    }),
+  })
+}
+
+// Phase 6: ask for a plan without running any tools. The UI shows
+// the steps; execution happens only after the user approves.
+export function requestPlan(message, conversationId, model, bundle) {
+  return request('/api/chat/plan/', {
+    method: 'POST',
+    body: JSON.stringify({
+      message,
+      conversation_id: conversationId,
+      model,
+      bundle: bundle || null,
     }),
   })
 }

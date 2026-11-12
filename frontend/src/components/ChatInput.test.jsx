@@ -95,6 +95,77 @@ function rapidEnters(textarea, times = 2) {
   })
 }
 
+describe('ChatInput plan + bundle controls (Phase 6)', () => {
+  function renderAgentInput(props = {}) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push(root)
+    act(() => {
+      root.render(
+        <ChatInput
+          providers={PROVIDERS}
+          model="groq::llama-3.3-70b-versatile"
+          onModel={() => {}}
+          agent={props.agent ?? true}
+          onAgent={() => {}}
+          coding={false}
+          onCoding={() => {}}
+          planFirst={props.planFirst ?? false}
+          onPlanFirst={props.onPlanFirst ?? (() => {})}
+          bundle={props.bundle ?? 'all'}
+          onBundle={props.onBundle ?? (() => {})}
+          onSend={() => {}}
+          sending={false}
+        />
+      )
+    })
+    return container
+  }
+
+  it('shows plan toggle and bundle picker only in agent mode', () => {
+    const agentOn = renderAgentInput({ agent: true })
+    expect(agentOn.querySelector('.bundle-picker')).toBeTruthy()
+    expect(
+      [...agentOn.querySelectorAll('button')].some((b) =>
+        b.textContent.startsWith('Plan')
+      )
+    ).toBe(true)
+
+    const agentOff = renderAgentInput({ agent: false })
+    expect(agentOff.querySelector('.bundle-picker')).toBeNull()
+    expect(
+      [...agentOff.querySelectorAll('button')].some((b) =>
+        b.textContent.startsWith('Plan')
+      )
+    ).toBe(false)
+  })
+
+  it('toggles plan-first and picks a bundle', () => {
+    const onPlanFirst = vi.fn()
+    const onBundle = vi.fn()
+    const container = renderAgentInput({ onPlanFirst, onBundle })
+    const planButton = [...container.querySelectorAll('button')].find(
+      (b) => b.textContent === 'Plan OFF'
+    )
+    act(() => {
+      planButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(onPlanFirst).toHaveBeenCalledWith(true)
+
+    const picker = container.querySelector('.bundle-picker')
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype,
+        'value'
+      ).set
+      setter.call(picker, 'research')
+      picker.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(onBundle).toHaveBeenCalledWith('research')
+  })
+})
+
 describe('ChatInput double-submit guard', () => {
   it('sends only once on two rapid Send clicks', () => {
     const onSend = vi.fn()

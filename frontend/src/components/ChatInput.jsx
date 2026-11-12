@@ -12,6 +12,10 @@ export default function ChatInput({
   onAgent,
   coding,
   onCoding,
+  planFirst,
+  onPlanFirst,
+  bundle,
+  onBundle,
   onSend,
   sending,
 }) {
@@ -80,6 +84,30 @@ export default function ChatInput({
       >
         Code {coding ? 'ON' : 'OFF'}
       </button>
+      {/* Phase 6: plan-then-execute + tool bundles only make sense
+          with tools on, so they appear with Agent mode. */}
+      {agent && (
+        <>
+          <button
+            className={planFirst ? 'agent-toggle active' : 'agent-toggle'}
+            onClick={() => onPlanFirst(!planFirst)}
+            title="Plan first: KAI shows its plan before running any tools"
+          >
+            Plan {planFirst ? 'ON' : 'OFF'}
+          </button>
+          <select
+            className="bundle-picker"
+            value={bundle}
+            onChange={(e) => onBundle(e.target.value)}
+            title="Tool bundle: which tools the agent may use"
+          >
+            <option value="all">All tools</option>
+            <option value="research">Research</option>
+            <option value="productivity">Productivity</option>
+            <option value="coding">Coding</option>
+          </select>
+        </>
+      )}
       <textarea
         className="composer-input"
         rows={1}

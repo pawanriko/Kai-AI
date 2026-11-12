@@ -29,6 +29,7 @@ vi.mock('./api', () => ({
   listConversations: vi.fn(),
   listModels: vi.fn(),
   logout: vi.fn(),
+  requestPlan: vi.fn(),
   sendChat: vi.fn(),
   sendChatStream: vi.fn(),
 }))
@@ -39,6 +40,8 @@ import {
   getMe,
   listConversations,
   listModels,
+  requestPlan,
+  sendChat,
   sendChatStream,
 } from './api'
 
@@ -254,5 +257,127 @@ describe('App research report button (Phase 5)', () => {
     })
     expect(exportReport).toHaveBeenCalledWith(7)
     vi.restoreAllMocks()
+  })
+})
+
+describe('App plan-then-execute flow (Phase 6)', () => {
+  function clickButton(container, text) {
+    const button = [...container.querySelectorAll('button')].find(
+      (b) => b.textContent === text
+    )
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    return button
+  }
+
+  async function enablePlanFirst(container) {
+    clickButton(container, 'Agent OFF')
+    await act(async () => {})
+    clickButton(container, 'Plan OFF')
+    await act(async () => {})
+  }
+
+  async function sendMessage(container, text) {
+    typeText(container.querySelector('.composer-input'), text)
+    await act(async () => {
+      container
+        .querySelector('.send-btn')
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {})
+    await act(async () => {})
+  }
+
+  it('shows the plan before anything runs, then executes on approval', async () => {
+    requestPlan.mockResolvedValue({
+      plan: { steps: ['Search the web', 'Read the docs'] },
+      bundle: null,
+      conversation_id: null,
+    })
+    sendChat.mockResolvedValue({
+      reply: 'Done.',
+      conversation_id: 9,
+      trace: [],
+    })
+    const container = await renderApp()
+    await enablePlanFirst(container)
+    await sendMessage(container, 'Research Django 5.2')
+
+    expect(requestPlan).toHaveBeenCalledWith(
+      'Research Django 5.2',
+      null,
+      'groq::llama-3.3-70b-versatile',
+      null
+    )
+    expect(sendChat).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('Proposed plan')
+    expect(container.textContent).toContain('Search the web')
+    // The user's message is not shown until the plan is approved.
+    expect(container.querySelector('.message-user')).toBeNull()
+
+    await act(async () => {
+      clickButton(container, 'Approve & run')
+    })
+    await act(async () => {})
+    expect(sendChat).toHaveBeenCalledWith(
+      'Research Django 5.2',
+      null,
+      'groq::llama-3.3-70b-versatile',
+      true,
+      false,
+      false,
+      { plan: ['Search the web', 'Read the docs'], plan_approved: true }
+    )
+    expect(container.textContent).not.toContain('Proposed plan')
+  })
+
+  it('cancelling a plan sends nothing', async () => {
+    requestPlan.mockResolvedValue({
+      plan: { steps: ['Search the web'] },
+      bundle: null,
+      conversation_id: null,
+    })
+    const container = await renderApp()
+    await enablePlanFirst(container)
+    await sendMessage(container, 'Research Django 5.2')
+
+    await act(async () => {
+      clickButton(container, 'Cancel')
+    })
+    expect(sendChat).not.toHaveBeenCalled()
+    expect(requestPlan).toHaveBeenCalledTimes(1)
+    expect(container.textContent).not.toContain('Proposed plan')
+  })
+
+  it('sends the bundle with agent runs even without planning', async () => {
+    sendChat.mockResolvedValue({
+      reply: 'Done.',
+      conversation_id: 9,
+      trace: [],
+    })
+    const container = await renderApp()
+    clickButton(container, 'Agent OFF')
+    await act(async () => {})
+    const picker = container.querySelector('.bundle-picker')
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype,
+        'value'
+      ).set
+      setter.call(picker, 'research')
+      picker.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await sendMessage(container, 'Research Django 5.2')
+    expect(requestPlan).not.toHaveBeenCalled()
+    expect(sendChat).toHaveBeenCalledWith(
+      'Research Django 5.2',
+      null,
+      'groq::llama-3.3-70b-versatile',
+      true,
+      false,
+      false,
+      { bundle: 'research' }
+    )
   })
 })
