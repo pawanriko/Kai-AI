@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 
+import { polishPrompt } from '../api'
 import {
   DEFAULT_VOICE_LANG,
   VOICE_LANGUAGES,
@@ -13,6 +14,7 @@ import {
   CodeIcon,
   MicIcon,
   PlanIcon,
+  PolishIcon,
   StopIcon,
 } from './icons'
 
@@ -124,8 +126,59 @@ export default function ChatInput({
     onSend(value)
   }
 
+  // Prompt polish: the rewrite is a suggestion, never auto-sent.
+  // `polished` holds the suggestion while its preview card is open;
+  // typing in the box clears it, because the suggestion was for
+  // the old draft. A failed polish leaves the draft untouched.
+  const inputRef = useRef(null)
+  const [polishing, setPolishing] = useState(false)
+  const [polished, setPolished] = useState(null)
+  const [polishError, setPolishError] = useState('')
+
+  async function handlePolish() {
+    const draft = text.trim()
+    if (!draft || polishing || sending) return
+    setPolishing(true)
+    setPolishError('')
+    try {
+      const result = await polishPrompt(draft)
+      setPolished(result.polished)
+    } catch {
+      setPolishError('Could not polish — try again.')
+    } finally {
+      setPolishing(false)
+    }
+  }
+
+  function usePolished() {
+    setText(polished)
+    setPolished(null)
+    inputRef.current?.focus()
+  }
+
+  function handleTextChange(e) {
+    setText(e.target.value)
+    setPolished(null)
+    setPolishError('')
+  }
+
   return (
-    <div className="composer">
+    <>
+      {polished !== null && (
+        <div className="polish-preview">
+          <p className="polish-label">Polished prompt</p>
+          <p className="polish-text">{polished}</p>
+          <div className="polish-actions">
+            <button type="button" onClick={usePolished}>
+              Use this
+            </button>
+            <button type="button" onClick={() => setPolished(null)}>
+              Keep original
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="composer">
       <select
         className="model-picker"
         value={model}
@@ -199,6 +252,7 @@ export default function ChatInput({
         </>
       )}
       <textarea
+        ref={inputRef}
         className="composer-input"
         rows={1}
         placeholder={
@@ -209,7 +263,7 @@ export default function ChatInput({
               : 'Type a message…'
         }
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={handleTextChange}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault()
@@ -219,6 +273,15 @@ export default function ChatInput({
       />
       <button className="send-btn" onClick={submit} disabled={sending}>
         Send
+      </button>
+      <button
+        className="polish-btn icon-btn"
+        onClick={handlePolish}
+        disabled={!text.trim() || polishing || sending}
+        aria-label={polishing ? 'Polishing…' : 'Polish prompt'}
+        title="Polish: rewrite this draft into a clearer prompt"
+      >
+        <PolishIcon />
       </button>
       {sttSupported && (
         <button
@@ -248,11 +311,12 @@ export default function ChatInput({
           <span aria-hidden="true">{voiceLang.startsWith('hi') ? 'अ' : 'A'}</span>
         </button>
       )}
-      {(interim || voiceError) && (
+      {(interim || voiceError || polishError) && (
         <span className="voice-hint">
-          {voiceError || `Hearing: ${interim}`}
+          {voiceError || polishError || `Hearing: ${interim}`}
         </span>
       )}
-    </div>
+      </div>
+    </>
   )
 }

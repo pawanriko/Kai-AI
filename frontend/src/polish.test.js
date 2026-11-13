@@ -33,7 +33,7 @@ describe('polish stylesheet', () => {
     expect(css).toContain('transition-duration: 0.01ms')
   })
 
-  it('styles every control class from Phases 5–7 and the icon controls', () => {
+  it('styles every control class from Phases 5–7, the icon controls, and the polish preview', () => {
     for (const selector of [
       '.bundle-picker',
       '.lang-btn',
@@ -45,6 +45,8 @@ describe('polish stylesheet', () => {
       '.report-row',
       '.icon-btn',
       '.expand-btn',
+      '.polish-preview',
+      '.polish-actions',
     ]) {
       expect(css, `missing styles for ${selector}`).toContain(selector)
     }

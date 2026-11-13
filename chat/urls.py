@@ -17,6 +17,7 @@ urlpatterns = [
     path("models/", views.model_catalog, name="model-catalog"),
     path("usage/", views.usage_list, name="usage-list"),
     path("tts/", views.synthesize_speech, name="synthesize-speech"),
+    path("polish/", views.polish_prompt, name="polish-prompt"),
     path("chat/", views.chat, name="chat"),
     path("chat/plan/", views.chat_plan, name="chat-plan"),
     path("chat/stream/", views.chat_stream, name="chat-stream"),

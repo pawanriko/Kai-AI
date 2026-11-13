@@ -640,6 +640,49 @@ summary:focus-visible {
   white-space: nowrap;
 }
 
+/* Prompt polish: the rewrite preview sits directly above the
+   composer, same glass treatment, full width of the chat column. */
+.polish-preview {
+  border-top: 1px solid var(--line);
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  padding: 0.8rem 1.5rem 0.9rem;
+}
+.polish-label {
+  margin: 0 0 0.3rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.polish-text {
+  margin: 0 0 0.6rem;
+  white-space: pre-wrap;
+}
+.polish-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+.polish-actions button {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+  padding: 0.4rem 0.9rem;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.polish-actions button:hover {
+  border-color: var(--text);
+}
+.polish-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* Phase 6: plan review card. */
 .plan-review {
   border: 1px solid var(--line);

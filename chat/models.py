@@ -242,6 +242,7 @@ class Usage(models.Model):
         STREAM = "stream", "Stream"
         AGENT = "agent", "Agent"
         EXTRACT = "extract", "Memory extraction"
+        POLISH = "polish", "Prompt polish"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

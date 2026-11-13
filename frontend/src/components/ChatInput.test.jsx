@@ -20,6 +20,9 @@ import { createRoot } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ChatInput from './ChatInput'
+import { polishPrompt } from '../api'
+
+vi.mock('../api', () => ({ polishPrompt: vi.fn() }))
 
 const PROVIDERS = [
   {
@@ -388,5 +391,97 @@ describe('ChatInput voice controls (Phase 7 Stage A)', () => {
     const container = renderVoiceInput()
     expect(micButton(container)).toBeNull()
     expect(container.querySelector('.lang-btn')).toBeNull()
+  })
+})
+
+describe('ChatInput prompt polish', () => {
+  beforeEach(() => {
+    polishPrompt.mockReset()
+  })
+
+  function polishButton(container) {
+    return container.querySelector('[aria-label="Polish prompt"]')
+  }
+
+  function previewAction(container, label) {
+    return [...container.querySelectorAll('.polish-actions button')].find(
+      (b) => b.textContent === label
+    )
+  }
+
+  function click(element) {
+    act(() => {
+      element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+  }
+
+  async function flush() {
+    await act(async () => {})
+    await act(async () => {})
+  }
+
+  async function openPreview(container, draft = 'rough draft') {
+    polishPrompt.mockResolvedValue({ polished: 'Clearer draft.' })
+    typeText(container.querySelector('.composer-input'), draft)
+    click(polishButton(container))
+    await flush()
+  }
+
+  it('disables the polish button when the box is empty', () => {
+    const { container } = renderInput({ onSend: () => {} })
+    expect(polishButton(container).disabled).toBe(true)
+    typeText(container.querySelector('.composer-input'), 'rough draft')
+    expect(polishButton(container).disabled).toBe(false)
+  })
+
+  it('shows the rewrite as a preview without sending', async () => {
+    const onSend = vi.fn()
+    const { container } = renderInput({ onSend })
+    await openPreview(container)
+    expect(polishPrompt).toHaveBeenCalledWith('rough draft')
+    expect(container.querySelector('.polish-text').textContent).toBe(
+      'Clearer draft.'
+    )
+    expect(onSend).not.toHaveBeenCalled()
+  })
+
+  it('Use replaces the draft and closes the preview', async () => {
+    const { container } = renderInput({ onSend: () => {} })
+    await openPreview(container)
+    const textarea = container.querySelector('.composer-input')
+    click(previewAction(container, 'Use this'))
+    expect(textarea.value).toBe('Clearer draft.')
+    expect(container.querySelector('.polish-preview')).toBeNull()
+  })
+
+  it('Keep original leaves the draft and closes the preview', async () => {
+    const { container } = renderInput({ onSend: () => {} })
+    await openPreview(container)
+    const textarea = container.querySelector('.composer-input')
+    click(previewAction(container, 'Keep original'))
+    expect(textarea.value).toBe('rough draft')
+    expect(container.querySelector('.polish-preview')).toBeNull()
+  })
+
+  it('a failed polish shows an error and keeps the draft', async () => {
+    const { container } = renderInput({ onSend: () => {} })
+    polishPrompt.mockRejectedValue(new Error('Polishing failed'))
+    const textarea = container.querySelector('.composer-input')
+    typeText(textarea, 'rough draft')
+    click(polishButton(container))
+    await flush()
+    expect(container.querySelector('.voice-hint').textContent).toBe(
+      'Could not polish — try again.'
+    )
+    expect(textarea.value).toBe('rough draft')
+    expect(container.querySelector('.polish-preview')).toBeNull()
+  })
+
+  it('typing clears an open preview', async () => {
+    const { container } = renderInput({ onSend: () => {} })
+    await openPreview(container)
+    const textarea = container.querySelector('.composer-input')
+    typeText(textarea, 'rough draft, edited')
+    expect(container.querySelector('.polish-preview')).toBeNull()
   })
 })

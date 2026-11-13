@@ -282,6 +282,17 @@ export async function speakCloud(text) {
   return response.blob()
 }
 
+// Prompt polish: POST a draft, get a clearer rewrite back. The
+// rewrite is only a suggestion — the composer shows it and the
+// user picks Use or Discard; nothing is ever auto-sent, and the
+// draft is never persisted server-side.
+export function polishPrompt(text) {
+  return request('/api/polish/', {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  })
+}
+
 export function confirmMemory(id) {
   return request(`/api/memories/${id}/confirm/`, { method: 'POST' })
 }

@@ -73,6 +73,7 @@ from . import (
     coding_tools,
     dedupe,
     ledger,
+    polish,
     reports,
     router,
     tts,
@@ -415,6 +416,47 @@ def synthesize_speech(request):
             status=502,
         )
     return HttpResponse(audio, content_type="audio/wav")
+
+
+@require_POST
+@login_required_json
+@rate_limit("polish", 10, 60)
+def polish_prompt(request):
+    """POST /api/polish/ {"text"} → {"polished": str}.
+
+    Rewrites a draft message into a clearer prompt. The rewrite is
+    returned, never sent: the frontend shows it and the user picks
+    Use or Discard. Nothing is persisted — drafts leave no record.
+    503 when no provider is configured, 502 when every provider
+    failed; the frontend keeps the original draft on either. The
+    call is recorded in the cost ledger (kind=polish) like any
+    other provider call. 10/min: polish is a small completion, but
+    a tight loop of rewrites should cost a pause, not a run.
+    """
+    body = _json_body(request)
+    if body is None:
+        return JsonResponse({"error": "invalid JSON"}, status=400)
+    text = str(body.get("text", "")).strip()
+    if not text:
+        return JsonResponse({"error": "text is required"}, status=400)
+    if len(text) > polish.MAX_POLISH_CHARS:
+        return JsonResponse(
+            {"error": "text is too long to polish"},
+            status=400,
+        )
+    if not polish.polish_available():
+        return JsonResponse(
+            {"error": "No AI provider is configured."}, status=503
+        )
+    task = router.classify_task(text)
+    rewritten = polish.polish(
+        text, on_usage=_usage_callback(request, task, Usage.Kind.POLISH)
+    )
+    if rewritten is None:
+        return JsonResponse(
+            {"error": "Polishing failed — try again."}, status=502
+        )
+    return JsonResponse({"polished": rewritten})
 
 
 def _system_prompt(request):

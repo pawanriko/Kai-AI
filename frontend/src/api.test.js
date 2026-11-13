@@ -27,6 +27,7 @@ import {
   logout,
   mergeMemories,
   proposeAction,
+  polishPrompt,
   rejectMemory,
   requestPlan,
   sendChat,
@@ -457,6 +458,32 @@ describe('api.js cloud TTS', () => {
     const error = await speakCloud('Hello').catch((e) => e)
     expect(error).toBeInstanceOf(Error)
     expect(error.message).toBe('Cloud voice failed')
+    expect(error.status).toBe(502)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('api.js prompt polish', () => {
+  it('posts the draft with CSRF and returns the rewrite', async () => {
+    const fetchMock = mockFetch(
+      jsonResponse(200, { polished: 'Clearer draft.' })
+    )
+    const result = await polishPrompt('rough draft')
+    expect(result).toEqual({ polished: 'Clearer draft.' })
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/polish/')
+    expect(options.method).toBe('POST')
+    expect(options.headers['X-CSRFToken']).toBe('fresh-token-123')
+    expect(JSON.parse(options.body)).toEqual({ text: 'rough draft' })
+  })
+
+  it('throws the server error with status when polishing fails', async () => {
+    const fetchMock = mockFetch(
+      jsonResponse(502, { error: 'Polishing failed — try again.' })
+    )
+    const error = await polishPrompt('rough draft').catch((e) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe('Polishing failed — try again.')
     expect(error.status).toBe(502)
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
