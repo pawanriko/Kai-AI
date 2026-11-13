@@ -1,12 +1,10 @@
 """Cloud TTS tests: the Gemini call is mocked — tests never touch
-the network. Covers the WAV wrapping, the synthesize contract
-(payload shape, failure modes) and the /api/tts/ endpoint
+the network. Covers the Interactions API contract (payload shape,
+audio extraction, failure modes) and the /api/tts/ endpoint
 (auth, validation, configured/unconfigured, failure mapping)."""
 
 import base64
-import io
 import json
-import wave
 from unittest import mock
 
 from django.contrib.auth import get_user_model
@@ -15,71 +13,104 @@ from django.test import TestCase
 
 from . import tts
 
+# A minimal valid WAV: 44-byte RIFF header, no frames. The
+# Interactions API returns complete WAV bytes; synthesize must pass
+# them through untouched, never re-wrap them.
+FAKE_WAV = (
+    b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"
+    b"\x80\x5d\x00\x00\x00\xbb\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+)
 
-def _gemini_audio_response(pcm):
+
+def _interactions_audio_response(wav_bytes):
     return {
-        "candidates": [
+        "steps": [
             {
-                "content": {
-                    "parts": [
-                        {
-                            "inlineData": {
-                                "mimeType": "audio/L16;codec=pcm;rate=24000",
-                                "data": base64.b64encode(pcm).decode("ascii"),
-                            }
-                        }
-                    ]
-                }
+                "type": "model_output",
+                "content": [
+                    {
+                        "type": "audio",
+                        "data": base64.b64encode(wav_bytes).decode("ascii"),
+                    }
+                ],
             }
         ]
     }
 
 
-class PcmToWavTests(TestCase):
-    def test_wav_header_describes_24khz_mono_16bit(self):
-        pcm = b"\x00\x01\x02\x03" * 100
-        wav_bytes = tts.pcm_to_wav(pcm)
-        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
-            self.assertEqual(wav.getnchannels(), 1)
-            self.assertEqual(wav.getsampwidth(), 2)
-            self.assertEqual(wav.getframerate(), 24000)
-            self.assertEqual(wav.getnframes(), len(pcm) // 2)
-            self.assertEqual(wav.readframes(wav.getnframes()), pcm)
+class ExtractAudioTests(TestCase):
+    def test_returns_decoded_bytes_from_last_audio_block(self):
+        first = base64.b64encode(b"first-wav").decode("ascii")
+        second = base64.b64encode(b"second-wav").decode("ascii")
+        data = {
+            "steps": [
+                {
+                    "type": "model_output",
+                    "content": [
+                        {"type": "audio", "data": first},
+                        {"type": "text", "text": "ignored"},
+                        {"type": "audio", "data": second},
+                    ],
+                }
+            ]
+        }
+        self.assertEqual(tts._extract_audio(data), b"second-wav")
 
-    def test_empty_pcm_is_header_only(self):
-        wav_bytes = tts.pcm_to_wav(b"")
-        self.assertEqual(len(wav_bytes), 44)
-        with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
-            self.assertEqual(wav.getnframes(), 0)
+    def test_skips_non_model_output_steps(self):
+        data = {
+            "steps": [
+                {
+                    "type": "tool_call",
+                    "content": [
+                        {
+                            "type": "audio",
+                            "data": base64.b64encode(b"nope").decode("ascii"),
+                        }
+                    ],
+                }
+            ]
+        }
+        self.assertIsNone(tts._extract_audio(data))
+
+    def test_output_audio_fallback_and_empty_responses(self):
+        data = {"output_audio": {"data": base64.b64encode(b"wav").decode("ascii")}}
+        self.assertEqual(tts._extract_audio(data), b"wav")
+        self.assertIsNone(tts._extract_audio({}))
+        self.assertIsNone(tts._extract_audio({"steps": []}))
+        self.assertIsNone(
+            tts._extract_audio(
+                {"steps": [{"type": "model_output", "content": []}]}
+            )
+        )
 
 
 class SynthesizeTests(TestCase):
-    def test_posts_audio_request_and_returns_wav(self):
-        pcm = b"\x10\x20" * 50
+    def test_posts_interactions_request_and_returns_wav_untouched(self):
         with (
             mock.patch.dict("os.environ", {"GEMINI_API_KEY": "gem-key"}),
             mock.patch(
                 "chat.tts._post_json",
-                return_value=_gemini_audio_response(pcm),
+                return_value=_interactions_audio_response(FAKE_WAV),
             ) as post,
         ):
             result = tts.synthesize("Hello there")
-        self.assertIsNotNone(result)
-        with wave.open(io.BytesIO(result), "rb") as wav:
-            self.assertEqual(wav.getnframes(), len(pcm) // 2)
+        self.assertEqual(result, FAKE_WAV)
         url, payload, headers = post.call_args.args
-        self.assertIn("gemini-3.8-flash-tts", url)
-        self.assertIn(":generateContent", url)
+        self.assertEqual(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/interactions",
+        )
         self.assertEqual(headers, {"x-goog-api-key": "gem-key"})
+        self.assertEqual(payload["model"], "gemini-3.8-flash-tts")
+        self.assertEqual(payload["response_format"], {"type": "audio"})
         self.assertEqual(
-            payload["generationConfig"]["responseModalities"], ["AUDIO"]
+            payload["generation_config"]["speech_config"],
+            [{"voice": "Kore"}],
         )
-        voice = payload["generationConfig"]["speechConfig"]["voiceConfig"]
+        user_input = payload["input"][0]
+        self.assertEqual(user_input["type"], "user_input")
         self.assertEqual(
-            voice["prebuiltVoiceConfig"]["voiceName"], "Kore"
-        )
-        self.assertEqual(
-            payload["contents"][0]["parts"][0]["text"], "Hello there"
+            user_input["content"], [{"type": "text", "text": "Hello there"}]
         )
 
     def test_model_and_voice_come_from_env(self):
@@ -94,15 +125,15 @@ class SynthesizeTests(TestCase):
             ),
             mock.patch(
                 "chat.tts._post_json",
-                return_value=_gemini_audio_response(b"\x00\x00"),
+                return_value=_interactions_audio_response(FAKE_WAV),
             ) as post,
         ):
             self.assertIsNotNone(tts.synthesize("hi"))
-        url, payload, _headers = post.call_args.args
-        self.assertIn("gemini-3.8-flash-lite-tts", url)
-        voice = payload["generationConfig"]["speechConfig"]["voiceConfig"]
+        _url, payload, _headers = post.call_args.args
+        self.assertEqual(payload["model"], "gemini-3.8-flash-lite-tts")
         self.assertEqual(
-            voice["prebuiltVoiceConfig"]["voiceName"], "Charon"
+            payload["generation_config"]["speech_config"],
+            [{"voice": "Charon"}],
         )
 
     def test_no_key_or_empty_text_returns_none_without_calling(self):
@@ -129,25 +160,9 @@ class SynthesizeTests(TestCase):
             self.assertIsNone(tts.synthesize("Hello"))
         with (
             mock.patch.dict("os.environ", {"GEMINI_API_KEY": "gem-key"}),
-            mock.patch(
-                "chat.tts._post_json",
-                return_value={"candidates": [{"content": {"parts": []}}]},
-            ),
+            mock.patch("chat.tts._post_json", return_value={"steps": []}),
         ):
             self.assertIsNone(tts.synthesize("Hello"))
-
-    def test_snake_case_inline_data_is_accepted(self):
-        pcm = b"\x01\x02" * 10
-        response = _gemini_audio_response(pcm)
-        part = response["candidates"][0]["content"]["parts"][0]
-        part["inline_data"] = part.pop("inlineData")
-        with (
-            mock.patch.dict("os.environ", {"GEMINI_API_KEY": "gem-key"}),
-            mock.patch("chat.tts._post_json", return_value=response),
-        ):
-            result = tts.synthesize("Hello")
-        self.assertIsNotNone(result)
-        self.assertEqual(len(result), 44 + len(pcm))
 
 
 class TtsEndpointTests(TestCase):
