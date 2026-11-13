@@ -1,7 +1,9 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 
+import { speakCloud } from '../api'
 import {
   DEFAULT_VOICE_LANG,
+  playAudioBlob,
   speak,
   speechSynthesisSupported,
   stopSpeaking,
@@ -29,7 +31,7 @@ import { SpeakerIcon, StopIcon } from './icons'
 
 const NEAR_BOTTOM_PX = 120
 
-function MessageBubble({ message: m, bubbleKey, speaking, onSpeak }) {
+function MessageBubble({ message: m, bubbleKey, speaking, onSpeak, ttsConfigured }) {
   return (
     <div className="bubble">
       <div className="bubble-role">{m.role === 'user' ? 'YOU' : 'KAI'}</div>
@@ -37,12 +39,14 @@ function MessageBubble({ message: m, bubbleKey, speaking, onSpeak }) {
       {(m.incomplete || m.status === 'incomplete') && (
         <div className="bubble-note">⚠️ Response interrupted — incomplete</div>
       )}
-      {/* Phase 7 (Stage A): read-aloud for assistant replies, via
-          speechSynthesis. The button appears only where the API
-          exists; speaking state lives in MessageList so only one
-          bubble can talk at a time. onSpeak is a stable callback
-          taking the bubble key, so React.memo keeps working. */}
-      {m.role === 'assistant' && speechSynthesisSupported() && (
+      {/* Read-aloud for assistant replies: the cloud voice when
+          the server has a key, else the browser voice. The button
+          appears when EITHER path exists — a browser without
+          speechSynthesis can still hear the cloud voice. Speaking
+          state lives in MessageList so only one bubble can talk
+          at a time. onSpeak is a stable callback taking the bubble
+          key, so React.memo keeps working. */}
+      {m.role === 'assistant' && (speechSynthesisSupported() || ttsConfigured) && (
         <button
           className="speak-btn icon-btn"
           onClick={() => onSpeak(bubbleKey, m.content)}
@@ -74,20 +78,52 @@ export default function MessageList({
   messages,
   sending,
   voiceLang = DEFAULT_VOICE_LANG,
+  ttsConfigured = false,
 }) {
   const listRef = useRef(null)
   const stickRef = useRef(true)
   const [speakingKey, setSpeakingKey] = useState(null)
+  // Guards the async cloud fetch: every speak/stop click bumps
+  // the token, so a fetch resolving after the user stopped (or
+  // picked another bubble) never starts stale audio.
+  const speakRequestRef = useRef(0)
 
   // Stop any speech when the transcript unmounts (view switch).
-  useEffect(() => () => stopSpeaking(), [])
+  useEffect(
+    () => () => {
+      speakRequestRef.current += 1
+      stopSpeaking()
+    },
+    []
+  )
 
   const handleSpeak = useCallback(
-    (key, content) => {
+    async (key, content) => {
+      const requestId = ++speakRequestRef.current
       if (speakingKey === key) {
         stopSpeaking()
         setSpeakingKey(null)
         return
+      }
+      stopSpeaking()
+      // Cloud voice first when the server has a key; ANY failure
+      // (unconfigured, rate-limited, provider down, playback
+      // refused) falls through to the browser voice, so read-aloud
+      // never hard-fails on a cloud problem.
+      if (ttsConfigured) {
+        try {
+          const blob = await speakCloud(content)
+          if (requestId !== speakRequestRef.current) return
+          const started = playAudioBlob(blob, {
+            onDone: () => setSpeakingKey(null),
+          })
+          if (started) {
+            setSpeakingKey(key)
+            return
+          }
+        } catch {
+          if (requestId !== speakRequestRef.current) return
+        }
       }
       const started = speak(content, {
         lang: voiceLang,
@@ -95,7 +131,7 @@ export default function MessageList({
       })
       if (started) setSpeakingKey(key)
     },
-    [speakingKey, voiceLang]
+    [speakingKey, voiceLang, ttsConfigured]
   )
 
   function handleScroll() {
@@ -137,6 +173,7 @@ export default function MessageList({
             bubbleKey={m.id ?? `local-${i}`}
             speaking={speakingKey === (m.id ?? `local-${i}`)}
             onSpeak={handleSpeak}
+            ttsConfigured={ttsConfigured}
           />
         </div>
       ))}

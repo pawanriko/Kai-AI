@@ -16,6 +16,7 @@ urlpatterns = [
     path("auth/logout/", views.logout_view, name="auth-logout"),
     path("models/", views.model_catalog, name="model-catalog"),
     path("usage/", views.usage_list, name="usage-list"),
+    path("tts/", views.synthesize_speech, name="synthesize-speech"),
     path("chat/", views.chat, name="chat"),
     path("chat/plan/", views.chat_plan, name="chat-plan"),
     path("chat/stream/", views.chat_stream, name="chat-stream"),

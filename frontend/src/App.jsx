@@ -487,6 +487,7 @@ export default function App() {
                 messages[messages.length - 1]?.role !== 'assistant'
               }
               voiceLang={voiceLang}
+              ttsConfigured={auth.tts_configured}
             />
             <ChatInput
               providers={providers}

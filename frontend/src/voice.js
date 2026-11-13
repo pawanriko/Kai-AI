@@ -175,6 +175,7 @@ export function speak(text, { lang, onDone } = {}) {
   warmUpVoices()
   const chunks = splitSentences(trimmed)
   const voice = pickVoice(lang || DEFAULT_VOICE_LANG)
+  stopCloudAudio()
   window.speechSynthesis.cancel()
   let pending = chunks.length
   const finishOne = () => {
@@ -229,7 +230,69 @@ export function pickVoice(lang) {
   return null
 }
 
+// Cloud audio playback: one Audio element at a time, under the
+// same "one speaker" rule as the synth path. stopSpeaking()
+// stops both, whichever is playing.
+let currentAudio = null
+let currentAudioUrl = null
+
+function stopCloudAudio() {
+  if (currentAudio) {
+    currentAudio.pause()
+    currentAudio.onended = null
+    currentAudio.onerror = null
+    currentAudio = null
+  }
+  if (
+    currentAudioUrl &&
+    typeof URL !== 'undefined' &&
+    typeof URL.revokeObjectURL === 'function'
+  ) {
+    URL.revokeObjectURL(currentAudioUrl)
+    currentAudioUrl = null
+  }
+}
+
+// Play audio bytes (a Blob from the cloud TTS endpoint).
+// Interrupts anything currently playing. onDone fires when the
+// clip ends, errors, or the browser refuses playback (autoplay
+// policy after the fetch broke the click's user gesture — a rare
+// edge that must still leave a clean stopped state, not a stuck
+// "speaking" bubble). Returns false when playback is impossible.
+export function playAudioBlob(blob, { onDone } = {}) {
+  if (
+    typeof window === 'undefined' ||
+    typeof window.Audio === 'undefined' ||
+    typeof URL === 'undefined' ||
+    typeof URL.createObjectURL !== 'function'
+  ) {
+    return false
+  }
+  if (!blob || blob.size === 0) return false
+  stopSpeaking()
+  const url = URL.createObjectURL(blob)
+  const audio = new window.Audio(url)
+  currentAudio = audio
+  currentAudioUrl = url
+  const finish = () => {
+    if (currentAudio === audio) {
+      currentAudio = null
+      currentAudioUrl = null
+    }
+    URL.revokeObjectURL(url)
+    onDone?.()
+  }
+  audio.onended = finish
+  audio.onerror = finish
+  const playing = audio.play()
+  if (playing && typeof playing.catch === 'function') {
+    playing.catch(() => finish())
+  }
+  return true
+}
+
 export function stopSpeaking() {
+  stopCloudAudio()
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     window.speechSynthesis.cancel()
   }

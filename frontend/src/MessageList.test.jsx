@@ -24,6 +24,9 @@ import { renderToString } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import MessageList from './components/MessageList'
+import { speakCloud } from './api'
+
+vi.mock('./api', () => ({ speakCloud: vi.fn() }))
 
 const roots = []
 let origScrollIntoView
@@ -330,5 +333,169 @@ describe('MessageList read-aloud (Phase 7 Stage A)', () => {
       { id: 1, role: 'assistant', content: 'Hello' },
     ])
     expect(container.querySelector('.speak-btn')).toBeNull()
+  })
+})
+
+describe('MessageList cloud read-aloud', () => {
+  class FakeAudio {
+    static instances = []
+
+    constructor(src) {
+      FakeAudio.instances.push(this)
+      this.src = src
+      this.play = vi.fn(() => Promise.resolve())
+      this.pause = vi.fn()
+    }
+
+    fireEnded() {
+      this.onended?.()
+    }
+  }
+
+  let utterances
+  let origAudio
+  let origCreateObjectURL
+  let origRevokeObjectURL
+
+  beforeEach(() => {
+    utterances = []
+    FakeAudio.instances = []
+    origAudio = window.Audio
+    origCreateObjectURL = URL.createObjectURL
+    origRevokeObjectURL = URL.revokeObjectURL
+    window.Audio = FakeAudio
+    URL.createObjectURL = vi.fn(() => 'blob:fake-url')
+    URL.revokeObjectURL = vi.fn()
+    window.speechSynthesis = { speak: vi.fn(), cancel: vi.fn() }
+    window.SpeechSynthesisUtterance = class {
+      constructor(text) {
+        this.text = text
+        utterances.push(this)
+      }
+    }
+    speakCloud.mockReset()
+  })
+
+  afterEach(() => {
+    if (origAudio === undefined) delete window.Audio
+    else window.Audio = origAudio
+    URL.createObjectURL = origCreateObjectURL
+    URL.revokeObjectURL = origRevokeObjectURL
+    delete window.speechSynthesis
+    delete window.SpeechSynthesisUtterance
+  })
+
+  function renderCloudList(messages, ttsConfigured) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push(root)
+    act(() => {
+      root.render(
+        <MessageList
+          messages={messages}
+          sending={false}
+          ttsConfigured={ttsConfigured}
+        />
+      )
+    })
+    return container
+  }
+
+  async function clickSpeak(container) {
+    await act(async () => {
+      container
+        .querySelector('.speak-btn')
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {})
+    await act(async () => {})
+  }
+
+  it('plays cloud audio when configured, and clears state on end', async () => {
+    speakCloud.mockResolvedValue(new Blob(['fake-wav']))
+    const container = renderCloudList(
+      [{ id: 1, role: 'assistant', content: 'Hello there' }],
+      true
+    )
+    await clickSpeak(container)
+    expect(speakCloud).toHaveBeenCalledWith('Hello there')
+    expect(FakeAudio.instances.length).toBe(1)
+    expect(FakeAudio.instances[0].play).toHaveBeenCalledTimes(1)
+    expect(window.speechSynthesis.speak).not.toHaveBeenCalled()
+    const button = container.querySelector('.speak-btn')
+    expect(button.getAttribute('aria-label')).toBe('Stop reading aloud')
+    act(() => {
+      FakeAudio.instances[0].fireEnded()
+    })
+    expect(button.getAttribute('aria-label')).toBe('Read aloud')
+  })
+
+  it('falls back to the browser voice when the cloud call fails', async () => {
+    speakCloud.mockRejectedValue(new Error('Cloud voice failed'))
+    const container = renderCloudList(
+      [{ id: 1, role: 'assistant', content: 'Hello there' }],
+      true
+    )
+    await clickSpeak(container)
+    expect(speakCloud).toHaveBeenCalledTimes(1)
+    expect(FakeAudio.instances.length).toBe(0)
+    expect(utterances[0].text).toBe('Hello there')
+    expect(window.speechSynthesis.speak).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the browser voice directly when the cloud voice is unconfigured', async () => {
+    const container = renderCloudList(
+      [{ id: 1, role: 'assistant', content: 'Hello there' }],
+      false
+    )
+    await clickSpeak(container)
+    expect(speakCloud).not.toHaveBeenCalled()
+    expect(utterances[0].text).toBe('Hello there')
+  })
+
+  it('never starts stale audio from a superseded fetch', async () => {
+    let resolveFirst
+    let resolveSecond
+    const first = new Promise((resolve) => {
+      resolveFirst = resolve
+    })
+    const second = new Promise((resolve) => {
+      resolveSecond = resolve
+    })
+    speakCloud.mockReturnValueOnce(first).mockReturnValueOnce(second)
+    const container = renderCloudList(
+      [{ id: 1, role: 'assistant', content: 'Hello there' }],
+      true
+    )
+    const button = container.querySelector('.speak-btn')
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    // A second click before the first fetch resolves supersedes it.
+    act(() => {
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    await act(async () => {
+      resolveFirst(new Blob(['stale-wav']))
+    })
+    await act(async () => {})
+    expect(FakeAudio.instances.length).toBe(0)
+    await act(async () => {
+      resolveSecond(new Blob(['fresh-wav']))
+    })
+    await act(async () => {})
+    expect(FakeAudio.instances.length).toBe(1)
+    expect(FakeAudio.instances[0].play).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the speak button without speechSynthesis when cloud is configured', () => {
+    delete window.speechSynthesis
+    delete window.SpeechSynthesisUtterance
+    const container = renderCloudList(
+      [{ id: 1, role: 'assistant', content: 'Hello' }],
+      true
+    )
+    expect(container.querySelector('.speak-btn')).toBeTruthy()
   })
 })

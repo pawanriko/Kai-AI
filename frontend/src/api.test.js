@@ -33,6 +33,7 @@ import {
   sendChatStream,
   setMemoryScope,
   setupOwner,
+  speakCloud,
 } from './api'
 
 function mockFetch(response) {
@@ -424,5 +425,39 @@ describe('api.js auth + CSRF', () => {
     expect(fetchMock.mock.calls[0][0]).toBe(
       '/api/automation/audit/?event=executed'
     )
+  })
+})
+
+describe('api.js cloud TTS', () => {
+  function blobResponse(status, blob, errorBody) {
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      blob: async () => blob,
+      json: async () => errorBody || {},
+    }
+  }
+
+  it('posts text with CSRF and returns the audio blob', async () => {
+    const blob = new Blob(['fake-wav'], { type: 'audio/wav' })
+    const fetchMock = mockFetch(blobResponse(200, blob))
+    const result = await speakCloud('Hello there')
+    expect(result).toBe(blob)
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/tts/')
+    expect(options.method).toBe('POST')
+    expect(options.headers['X-CSRFToken']).toBe('fresh-token-123')
+    expect(JSON.parse(options.body)).toEqual({ text: 'Hello there' })
+  })
+
+  it('throws the server error with status when the cloud voice fails', async () => {
+    const fetchMock = mockFetch(
+      blobResponse(502, null, { error: 'Cloud voice failed' })
+    )
+    const error = await speakCloud('Hello').catch((e) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe('Cloud voice failed')
+    expect(error.status).toBe(502)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

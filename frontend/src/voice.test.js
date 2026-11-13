@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createRecognizer,
   pickVoice,
+  playAudioBlob,
   resetVoiceCache,
   speak,
   speechRecognitionSupported,
@@ -307,5 +308,119 @@ describe('voice warm-up', () => {
     }
     expect(speak('Hello Kai')).toBe(true)
     expect(addEventListener).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('cloud audio playback', () => {
+  class FakeAudio {
+    static instances = []
+    static playResult = Promise.resolve()
+
+    constructor(src) {
+      FakeAudio.instances.push(this)
+      this.src = src
+      this.play = vi.fn(() => FakeAudio.playResult)
+      this.pause = vi.fn()
+    }
+
+    fireEnded() {
+      this.onended?.()
+    }
+
+    fireError() {
+      this.onerror?.()
+    }
+  }
+
+  let origAudio
+  let origCreateObjectURL
+  let origRevokeObjectURL
+
+  beforeEach(() => {
+    FakeAudio.instances = []
+    FakeAudio.playResult = Promise.resolve()
+    origAudio = window.Audio
+    origCreateObjectURL = URL.createObjectURL
+    origRevokeObjectURL = URL.revokeObjectURL
+    window.Audio = FakeAudio
+    URL.createObjectURL = vi.fn(() => 'blob:fake-url')
+    URL.revokeObjectURL = vi.fn()
+    window.speechSynthesis = { speak: vi.fn(), cancel: vi.fn() }
+    window.SpeechSynthesisUtterance = class {
+      constructor(text) {
+        this.text = text
+      }
+    }
+  })
+
+  afterEach(() => {
+    stopSpeaking()
+    if (origAudio === undefined) delete window.Audio
+    else window.Audio = origAudio
+    URL.createObjectURL = origCreateObjectURL
+    URL.revokeObjectURL = origRevokeObjectURL
+    delete window.speechSynthesis
+    delete window.SpeechSynthesisUtterance
+    resetVoiceCache()
+  })
+
+  it('plays the blob and reports done when it ends', () => {
+    const onDone = vi.fn()
+    const blob = new Blob(['fake-wav'], { type: 'audio/wav' })
+    expect(playAudioBlob(blob, { onDone })).toBe(true)
+    const audio = FakeAudio.instances[0]
+    expect(URL.createObjectURL).toHaveBeenCalledWith(blob)
+    expect(audio.src).toBe('blob:fake-url')
+    expect(audio.play).toHaveBeenCalledTimes(1)
+    expect(onDone).not.toHaveBeenCalled()
+    audio.fireEnded()
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:fake-url')
+    expect(onDone).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports done on playback error and on refused play', async () => {
+    const onDone = vi.fn()
+    const blob = new Blob(['fake-wav'])
+    playAudioBlob(blob, { onDone })
+    FakeAudio.instances[0].fireError()
+    expect(onDone).toHaveBeenCalledTimes(1)
+
+    // The browser refusing play() (autoplay policy) must still
+    // leave a clean stopped state via onDone, not a stuck bubble.
+    const onDone2 = vi.fn()
+    FakeAudio.playResult = Promise.reject(new Error('no gesture'))
+    playAudioBlob(new Blob(['fake-wav']), { onDone: onDone2 })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(onDone2).toHaveBeenCalledTimes(1)
+    FakeAudio.playResult = Promise.resolve()
+  })
+
+  it('refuses empty blobs and missing Audio support', () => {
+    expect(playAudioBlob(new Blob([]))).toBe(false)
+    delete window.Audio
+    expect(playAudioBlob(new Blob(['x']))).toBe(false)
+  })
+
+  it('stops cloud audio on stopSpeaking and on a second clip', () => {
+    const blob = new Blob(['fake-wav'])
+    playAudioBlob(blob, {})
+    const first = FakeAudio.instances[0]
+    playAudioBlob(blob, {})
+    expect(first.pause).toHaveBeenCalledTimes(1)
+    expect(first.onended).toBeNull()
+    const second = FakeAudio.instances[1]
+    stopSpeaking()
+    expect(second.pause).toHaveBeenCalledTimes(1)
+    expect(URL.revokeObjectURL).toHaveBeenCalled()
+  })
+
+  it('browser speech interrupts cloud audio', () => {
+    const blob = new Blob(['fake-wav'])
+    playAudioBlob(blob, {})
+    const audio = FakeAudio.instances[0]
+    expect(speak('Hello Kai')).toBe(true)
+    expect(audio.pause).toHaveBeenCalledTimes(1)
+    expect(window.speechSynthesis.speak).toHaveBeenCalledTimes(1)
   })
 })

@@ -75,6 +75,7 @@ from . import (
     ledger,
     reports,
     router,
+    tts,
 )
 from .models import (
     AuditLog,
@@ -154,6 +155,7 @@ def me(request):
             "needs_setup": not get_user_model().objects.exists(),
             "setup_enabled": bool(_setup_token()),
             "coding_enabled": coding_tools.execution_enabled(),
+            "tts_configured": tts.tts_configured(),
         }
     )
 
@@ -373,6 +375,46 @@ def usage_list(request):
             ],
         }
     )
+
+
+@require_POST
+@login_required_json
+@rate_limit("tts", 3, 60)
+def synthesize_speech(request):
+    """POST /api/tts/ {"text"} → WAV audio of the cloud voice reading
+    the text aloud.
+
+    The Gemini API key stays server-side; the browser never sees it.
+    503 when no key is configured, 502 when synthesis fails (dead
+    key, rate limit, provider error) — the frontend falls back to
+    the browser voice on either, so read-aloud never hard-fails.
+    Text over the cap is a 400 (the frontend falls back there too
+    rather than truncating a reply mid-sentence). The 3/min limit
+    matches the Gemini free tier's 3 requests/min; a burst past it
+    gets a 429 and the same graceful fallback.
+    """
+    body = _json_body(request)
+    if body is None:
+        return JsonResponse({"error": "invalid JSON"}, status=400)
+    text = str(body.get("text", "")).strip()
+    if not text:
+        return JsonResponse({"error": "text is required"}, status=400)
+    if len(text) > tts.MAX_TTS_CHARS:
+        return JsonResponse(
+            {"error": "text is too long for one cloud reading"},
+            status=400,
+        )
+    if not tts.tts_configured():
+        return JsonResponse(
+            {"error": "Cloud voice is not configured."}, status=503
+        )
+    audio = tts.synthesize(text)
+    if audio is None:
+        return JsonResponse(
+            {"error": "Cloud voice failed — try the browser voice."},
+            status=502,
+        )
+    return HttpResponse(audio, content_type="audio/wav")
 
 
 def _system_prompt(request):

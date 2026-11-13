@@ -252,6 +252,36 @@ export function exportReport(conversationId) {
   return fetchBlob(`/api/conversations/${conversationId}/report/`)
 }
 
+// Cloud read-aloud: POST text, get WAV audio back. A POST blob, so
+// it cannot reuse fetchBlob (GET-only) — same error shape as
+// request() (thrown Error with .status), so the caller falls back
+// to the browser voice on 400/429/502/503 exactly like any other
+// failed call. The API key stays server-side; this call only ever
+// carries text.
+export async function speakCloud(text) {
+  const response = await fetch('/api/tts/', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-CSRFToken': csrfToken(),
+    },
+    body: JSON.stringify({ text }),
+  })
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`
+    try {
+      const data = await response.json()
+      if (data.error) message = data.error
+    } catch {
+      // keep the generic message
+    }
+    const error = new Error(message)
+    error.status = response.status
+    throw error
+  }
+  return response.blob()
+}
+
 export function confirmMemory(id) {
   return request(`/api/memories/${id}/confirm/`, { method: 'POST' })
 }
