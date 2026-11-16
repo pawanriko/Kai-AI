@@ -71,6 +71,25 @@ PROVIDERS = {
             ("thinkingmachines/inkling-2-small:free", "Inkling 2 Small (free)"),
             ("baidu/ernie-5.5-flash-preview:free", "ERNIE 5.5 Flash (free)"),
             ("liquid/lfm-3-1.7b:free", "LFM 3 1.7B (free)"),
+            # Free-model addition (2026-11-14): Ling 3.2 Flash,
+            # Ant Group inclusionAI's 560B/25B-active MoE, hybrid
+            # reasoning, 1M context. Newest model on OpenRouter's
+            # live /api/v1/models list (created 2026-11-13), $0
+            # prompt AND completion, tools + tool_choice +
+            # structured_outputs in supported_parameters — so
+            # KAI's OpenAI-format adapter and agent-mode tool
+            # calls work unchanged. Placed last among the free
+            # models: it is a picker option, never a default.
+            # KNOWN EXPIRY: Ant's own docs price it free for the
+            # first 2 weeks after its 2026-11-05 launch, so the
+            # free window ends ~2026-11-19, and there is NO paid
+            # inclusionai/ling-3.2-flash variant on OpenRouter —
+            # when the promo ends this ID likely disappears. The
+            # Phase 3 catalogue self-check flags dead IDs, and a
+            # dead non-default ID is skipped by the fallback chain
+            # (it is only tried when picked directly). Re-check
+            # this line on/after 2026-11-19 and remove it if dead.
+            ("inclusionai/ling-3.2-flash:free", "Ling 3.2 Flash (free)"),
             ("meta/muse-ember", "Muse Ember"),
             ("deepseek/deepseek-v3.2", "DeepSeek V3.2"),
             ("tencent/hy4", "Hy4"),
