@@ -126,6 +126,16 @@ PROVIDERS = {
         "format": "gemini",
         "models": [
             ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+            # Gemini 4 Hydrogen (added 2026-11-13): GA 2026-11-12,
+            # verified live on Google's model page
+            # (ai.google.dev/gemini-api/docs/models/gemini-4-hydrogen)
+            # and OpenRouter's live list ($1.50/$7.50 per M, 1M
+            # context, tools + tool_choice supported). Google's
+            # successor to 3.8 Flash for everyday coding + agentic
+            # work; function calling is natively supported, which
+            # is what KAI's Gemini adapter already sends. Placed
+            # after 3.8 Flash so the Gemini default is unchanged.
+            ("gemini-4-hydrogen", "Gemini 4 Hydrogen"),
             ("gemini-2.5-flash", "Gemini 2.5 Flash"),
         ],
     },
