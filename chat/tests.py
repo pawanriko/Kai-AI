@@ -242,7 +242,7 @@ class ProviderRoutingTests(TestCase):
         }
         reply = ai.ask_ai(
             [{"role": "user", "content": "hi"}],
-            model="gemini::gemini-2.5-flash",
+            model="gemini::gemini-4-hydrogen",
         )
         self.assertEqual(reply, "from gemini")
 
@@ -2626,6 +2626,28 @@ class AiStreamFailureTests(TestCase):
             "liquid/lfm-3-1.7b:free",
         ):
             self.assertIn(model_id, ids)
+        self.assertEqual(
+            ai.default_model("openrouter"),
+            "nvidia/nemotron-3-ultra-550b-a55b:free",
+        )
+
+    def test_catalogue_has_ling_3_2_flash_free(self):
+        """Free-model addition (2026-11-14): Ling 3.2 Flash was
+        verified firsthand on OpenRouter's live models list with
+        $0 prompt AND completion pricing, 1M context, and tools
+        in supported_parameters. It must be present with its exact
+        ID, and the default must be untouched by the addition.
+        NOTE: Ant prices it free only for the first 2 weeks after
+        its 2026-11-05 launch (~until 2026-11-19), with no paid
+        variant on OpenRouter — if this test starts failing
+        against the live list after that date, the ID is dead and
+        the line should be removed, not "fixed" to a paid ID."""
+        from . import ai
+
+        ids = [
+            m["id"] for p in ai.catalog() for m in p["models"]
+        ]
+        self.assertIn("inclusionai/ling-3.2-flash:free", ids)
         self.assertEqual(
             ai.default_model("openrouter"),
             "nvidia/nemotron-3-ultra-550b-a55b:free",
