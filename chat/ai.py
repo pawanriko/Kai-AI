@@ -136,7 +136,12 @@ PROVIDERS = {
             # is what KAI's Gemini adapter already sends. Placed
             # after 3.8 Flash so the Gemini default is unchanged.
             ("gemini-4-hydrogen", "Gemini 4 Hydrogen"),
-            ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+            # gemini-2.5-flash removed 2026-11-13: Google deprecated
+            # it — from 2026-12-01 its requests auto-route to
+            # gemini-3.5-flash-lite, so the picker now names the
+            # model Google actually serves (per the deprecation
+            # notice on ai.google.dev/gemini-api/docs/models).
+            ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite"),
         ],
     },
 }
