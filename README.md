@@ -1,5 +1,12 @@
 # KAI v2 — my personal AI assistant (Django + React)
 
+[![Live](https://img.shields.io/badge/live-kai--ai--02i0.onrender.com-2ea44f)](https://kai-ai-02i0.onrender.com)
+[![Tests](https://img.shields.io/badge/tests-219%20backend%20%C2%B7%20124%20frontend%20passing-2ea44f)](https://github.com/pawanriko/Kai-AI)
+![Top language](https://img.shields.io/github/languages/top/pawanriko/Kai-AI)
+![Stars](https://img.shields.io/github/stars/pawanriko/Kai-AI?style=social)
+
+[![My Skills](https://skillicons.dev/icons?i=python,django,react,js,vite,sqlite,postgres,git,github)](https://skillicons.dev)
+
 The first version of KAI was a single `index.html` file. The browser kept the Groq API key, talked to Groq directly, and the "memory" lived in localStorage — so it forgot everything the day I cleared my browser data. It worked, but it wasn't a real app.
 
 So I rebuilt it properly. v2 is a full-stack app:
@@ -12,11 +19,14 @@ So I rebuilt it properly. v2 is a full-stack app:
 
 ## How it fits together
 
-```
-Browser (React, :5173 dev) ──JSON──► Django API (:8000) ──HTTPS──► Groq / Gemini
-                                          │
-                                          ▼
-                                   SQLite (dev) → Postgres
+```mermaid
+flowchart LR
+    User([You in the browser]) --> React[React SPA]
+    React -->|POST /api/chat/ JSON| Django[Django API]
+    Django --> DB[(Postgres / SQLite<br/>conversations, messages, memories)]
+    Django --> Provider[AI provider<br/>Groq / OpenRouter / NVIDIA<br/>DeepSeek / Gemini]
+    Provider --> Django
+    Django -->|reply + saved messages| React
 ```
 
 What happens when I send one message: React POSTs to `/api/chat/` → Django loads that conversation's history from the DB → puts together the message list the AI APIs expect → adds a system prompt carrying my stored facts → calls the provider → saves both messages → extracts any new facts → sends the reply back to React.
@@ -32,16 +42,21 @@ kai-v2/
 ├── chat/                     the app that is KAI
 │   ├── models.py             Conversation / Message / Memory tables
 │   ├── ai.py                 the ONLY module that talks to Groq/Gemini
+│   ├── router.py             smart model routing (Auto + coding picks)
+│   ├── agent.py / tools.py   agent-mode tools (calculator, datetime, weather)
+│   ├── polish.py             prompt-polisher endpoint
+│   ├── research.py           web research with citations
 │   ├── views.py              the API endpoints
 │   ├── urls.py               /api/ route table
 │   ├── ratelimit.py          per-IP fixed-window rate limiting
-│   └── tests.py              51 tests, AI + tools mocked (no network)
+│   └── tests.py              219 backend tests, AI + tools mocked (no network)
 ├── docs/                     architecture + security/feature audits
 └── frontend/                 Vite + React
     └── src/
         ├── api.js            every backend call in one place
         ├── App.jsx           state conductor
-        └── components/       Login, Sidebar, MessageList, ChatInput, MemoryPanel
+        └── components/       Login, Sidebar, MessageList, ChatInput, MemoryPanel,
+                              UsagePanel, PlanReview, AutomationPanel
 ```
 
 ## API
@@ -106,8 +121,8 @@ npm run dev
 Open http://localhost:5173 — the Vite dev server proxies `/api` calls to Django on :8000.
 
 First open asks you to create the owner account (or log in) — KAI is
-locked to everyone else. Tests: `python manage.py test` (51 backend
-tests, no network needed) and `npm test` in `frontend/` (11 tests for
+locked to everyone else. Tests: `python manage.py test` (219 backend
+tests, no network needed) and `npm test` in `frontend/` (124 frontend tests for
 the API client's auth/CSRF/setup/memory behaviour). Production
 frontend build: `npm run build` in `frontend/`.
 
@@ -147,10 +162,10 @@ In `ai.py` there's a registry of providers. A model is just a name; a provider i
 | Provider | Key in `.env` | Models offered |
 |---|---|---|
 | Groq | `GROQ_API_KEY` | Llama 3.3 70B, GPT OSS 120B/20B, Llama 4 Scout, Qwen3 32B, Llama 3.1 8B |
-| OpenRouter | `OPENROUTER_API_KEY` | Nemotron 3 Ultra 550B (free), Gemma 4 31B (free), North Mini Code (free), Muse Ember, DeepSeek V3.2, Hy4, Mistral Large 4, Opus 4.6 |
+| OpenRouter | `OPENROUTER_API_KEY` | Nemotron 3 Ultra 550B (free), Gemma 4 31B/26B (free), Nemotron 3.5 Lightning (free), Nemotron 3 Nano Reasoning (free), ERNIE 5.5 Flash (free), LFM 3 1.7B (free), Ling 3.2 Flash (free), Muse Ember, DeepSeek V3.2, Hy4, Mistral Large 4 |
 | NVIDIA NIM | `NVIDIA_API_KEY` | Nemotron Super 49B, DeepSeek V4 Flash |
 | DeepSeek | `DEEPSEEK_API_KEY` | DeepSeek Chat, DeepSeek Reasoner |
-| Google Gemini | `GEMINI_API_KEY` | Gemini 3.8 Flash, Gemini 2.5 Flash |
+| Google Gemini | `GEMINI_API_KEY` | Gemini 3.8 Flash, Gemini 4 Hydrogen, Gemini 3.5 Flash-Lite |
 
 The model picker in the UI is fed by `GET /api/models/`, and providers whose key I haven't set are greyed out. If the provider I pick fails or hits a rate limit, KAI quietly tries the other configured ones. If I want only one provider, I set `AI_PROVIDER=<name>` in `.env` and the fallback stops.
 
