@@ -52,7 +52,11 @@ PROVIDERS = {
         "models": [
             ("nvidia/nemotron-3-ultra-550b-a55b:free", "Nemotron 3 Ultra 550B (free)"),
             ("google/gemma-4-31b-it:free", "Gemma 4 31B (free)"),
-            ("cohere/north-mini-code:free", "North Mini Code (free)"),
+            # North Mini Code (free) REMOVED 2026-11-21: OpenRouter
+            # delisted cohere/north-mini-code:free (no longer on the
+            # live /api/v1/models list); a dead ID 404s when picked.
+            # Its router-policy slot moved to Nemotron 3 Nano
+            # Reasoning (free) — see chat/router.py.
             # Phase 2.2: extra free fallbacks, each ID verified live
             # against OpenRouter's models list (2026-11-12) before
             # adding — a dead ID here fails the whole chain silently
@@ -68,7 +72,12 @@ PROVIDERS = {
             # new providers, and one small/fast model. OpenRouter
             # free models carry the 20/min + daily request caps.
             ("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "Nemotron 3 Nano Reasoning (free)"),
-            ("thinkingmachines/inkling-2-small:free", "Inkling 2 Small (free)"),
+            # Inkling 2 Small (free) REMOVED 2026-11-21: OpenRouter
+            # delisted thinkingmachines/inkling-2-small:free (no
+            # longer on the live /api/v1/models list). Its successor,
+            # Inkling 2 Mini, LANDED on OpenRouter 2026-11-22 (live
+            # /api/v1/models list, created 2026-11-20) — listed
+            # below as a paid picker option, NOT a free one.
             ("baidu/ernie-5.5-flash-preview:free", "ERNIE 5.5 Flash (free)"),
             ("liquid/lfm-3-1.7b:free", "LFM 3 1.7B (free)"),
             # Free-model addition (2026-11-14): Ling 3.2 Flash,
