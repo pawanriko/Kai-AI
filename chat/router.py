@@ -93,7 +93,11 @@ POLICY = {
         ("openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free"),
     ],
     "coding": [
-        ("openrouter", "cohere/north-mini-code:free"),
+        # 2026-11-21: was cohere/north-mini-code:free — OpenRouter
+        # delisted it, so the slot moves to the verified-live free
+        # reasoning model (reasoning suits debugging); Lightning
+        # stays as the fast fallback.
+        ("openrouter", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"),
         ("openrouter", "nvidia/nemotron-3.5-lightning:free"),
     ],
     "research": [

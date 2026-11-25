@@ -2609,11 +2609,14 @@ class AiStreamFailureTests(TestCase):
         )
 
     def test_catalogue_has_verified_free_additions(self):
-        """Free-models commit (2026-11-12): the four additions were
-        each verified firsthand on OpenRouter's live models list
-        with $0 prompt AND completion pricing. They must be present
-        with their exact IDs, still marked free, and the default
-        must be untouched by the additions."""
+        """Free-models commit (2026-11-12): the additions were each
+        verified firsthand on OpenRouter's live models list with $0
+        prompt AND completion pricing. They must be present with
+        their exact IDs, still marked free, and the default must be
+        untouched by the additions. NOTE: the fourth addition,
+        thinkingmachines/inkling-2-small:free, was REMOVED
+        2026-11-21 — OpenRouter delisted it, so it must NOT be
+        re-added here; a dead ID 404s when picked."""
         from . import ai
 
         ids = [
@@ -2621,11 +2624,11 @@ class AiStreamFailureTests(TestCase):
         ]
         for model_id in (
             "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-            "thinkingmachines/inkling-2-small:free",
             "baidu/ernie-5.5-flash-preview:free",
             "liquid/lfm-3-1.7b:free",
         ):
             self.assertIn(model_id, ids)
+        self.assertNotIn("thinkingmachines/inkling-2-small:free", ids)
         self.assertEqual(
             ai.default_model("openrouter"),
             "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -2767,7 +2770,9 @@ class RouterTests(TestCase):
             [{"role": "user", "content": "fix this python bug"}]
         )
         self.assertEqual(provider, "openrouter")
-        self.assertEqual(model, "cohere/north-mini-code:free")
+        self.assertEqual(
+            model, "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+        )
 
     @mock.patch.dict("os.environ", {}, clear=True)
     def test_route_task_degrades_to_default_when_nothing_configured(self):
@@ -3267,5 +3272,6 @@ class UsageRecordingTests(LoggedInTestCase):
                 )
         self.assertEqual(reply, "ok")
         self.assertEqual(
-            post.call_args[0][1]["model"], "cohere/north-mini-code:free"
+            post.call_args[0][1]["model"],
+            "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
         )
